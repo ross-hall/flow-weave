@@ -765,8 +765,19 @@
       }).join('');
       defs = `<linearGradient id="fw-shared" gradientUnits="userSpaceOnUse" x1="${gradX0}" y1="0" x2="${gradX1}" y2="0">${stopMarkup}</linearGradient>`;
     }
+    // RULE: every animated node/line syncs its begin to this one shared,
+    // invisible clock (via begin="fw-clock.begin") instead of each resolving
+    // its own default begin="0s" independently. With many targets (many
+    // diamonds, many stage-0 pulses all inserted in the same render), the
+    // browser can activate that many independent SMIL timelines a frame or
+    // two apart, so the "start" appears to fire at slightly different times
+    // per element — worse the more there are. Keying every animation off one
+    // shared syncbase event guarantees they all start on the exact same tick
+    // regardless of element count.
+    let clockMk = '';
     if(animateOn){
       defs += `<filter id="fw-glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
+      clockMk = `<rect width="0" height="0"><animate id="fw-clock" attributeName="width" from="0" to="0" begin="0s" dur="${CYCLE}s" repeatCount="indefinite"/></rect>`;
     }
 
     // RULE: each layer's color is sampled off the shared gradient at that
@@ -798,7 +809,7 @@
         const sweep = sweepEnvelope(t0, t1, 0, -(1-DASH_LEN));
         const fade = pulseOpacityEnvelope(t0, t1, CROSSFADE, PULSE_OPACITY);
         stageLines[li].forEach(l => {
-          pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
+          pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" begin="fw-clock.begin" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" begin="fw-clock.begin" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
         });
       }
     }
@@ -824,8 +835,8 @@
             return;
           }
           const colorEnv = litEnvelope(0, COLOR_HOLD, '#ffffff', litColor);
-          nodesMk += `<polygon points="${diamondPoints(x,y,haloR)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
-          nodesMk += `<polygon points="${diamondPoints(x,y,dotR)}" fill="#ffffff" opacity="0.95"><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
+          nodesMk += `<polygon points="${diamondPoints(x,y,haloR)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="fill" begin="fw-clock.begin" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
+          nodesMk += `<polygon points="${diamondPoints(x,y,dotR)}" fill="#ffffff" opacity="0.95"><animate attributeName="fill" begin="fw-clock.begin" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
           return;
         }
         if(!animateOn){
@@ -839,8 +850,8 @@
         // RULE: every node — including the source — only holds its color
         // briefly when the glow passes, then reverts to white.
         const colorEnv = litEnvelope(af, COLOR_HOLD, '#ffffff', litColor);
-        nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="r" keyTimes="${haloEnv.keyTimes}" values="${haloEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
-        nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"><animate attributeName="r" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
+        nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="r" begin="fw-clock.begin" keyTimes="${haloEnv.keyTimes}" values="${haloEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" begin="fw-clock.begin" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
+        nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"><animate attributeName="r" begin="fw-clock.begin" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" begin="fw-clock.begin" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
       });
     });
 
@@ -856,7 +867,7 @@
     const bg = includeBg ? `<rect x="0" y="0" width="${W}" height="${H}" fill="#000000"/>` : '';
 
     stage.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    stage.innerHTML = `<defs>${defs}</defs>${bg}<g>${paths}</g><g>${pulseMk}</g><g>${nodesMk}</g>`;
+    stage.innerHTML = `<defs>${defs}</defs>${clockMk}${bg}<g>${paths}</g><g>${pulseMk}</g><g>${nodesMk}</g>`;
   }
 
   function fullRegenerate(){
