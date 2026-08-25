@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Flow Weave</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --bg-panel:#0e0f13;
+    --bg-panel-2:#000000;
+    --line:#24262d;
+    --text:#e8eaed;
+    --text-dim:#8b909a;
+    --accent:#ff2ea6;
+    --card-bg:#000000;
+  }
+  * { box-sizing: border-box; }
+  html,body{
+    margin:0; height:100%;
+    background:var(--bg-panel-2);
+    color:var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  .app{ display:flex; height:100vh; width:100vw; overflow:hidden; }
+
+  .sidebar{
+    width: 320px; min-width:320px;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--line);
+    display:flex; flex-direction:column;
+    overflow-y:auto;
+  }
+  .sidebar-head{ padding: 22px 20px 16px; border-bottom:1px solid var(--line); }
+  .sidebar-head .eyebrow{
+    font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--accent); font-weight:600; margin-bottom:6px; font-family: 'SF Mono', ui-monospace, monospace;
+  }
+  .sidebar-head h1{ font-size:18px; margin:0 0 4px; font-weight:600; letter-spacing:-.01em; }
+  .sidebar-head p{ font-size:12.5px; color:var(--text-dim); margin:0; line-height:1.5; }
+
+  .section{ padding: 18px 20px; border-bottom:1px solid var(--line); }
+  .section h2{
+    font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--text-dim); margin:0 0 12px; font-weight:600;
+  }
+
+  button{
+    font-family:inherit; font-size:13px; font-weight:600; cursor:pointer;
+    border-radius:7px; border:1px solid transparent; padding:10px 14px;
+    width:100%; transition: transform .08s ease, background .15s, border-color .15s;
+  }
+  button:active{ transform: scale(0.98); }
+  .btn-primary{ background:var(--accent); color:#180311; }
+  .btn-primary:hover{ background:#ff59ba; }
+  .btn-secondary{ background:transparent; color:var(--text); border-color:var(--line); }
+  .btn-secondary:hover{ border-color:var(--accent); color:var(--accent); }
+  .btn-row{ display:flex; gap:8px; }
+  .btn-row button{ flex:1; }
+  .btn-row-3{ display:flex; gap:6px; }
+  .btn-row-3 button{ flex:1; padding:9px 4px; font-size:11.5px; }
+
+  label.field{ display:block; font-size:11.5px; color:var(--text-dim); margin: 14px 0 6px; }
+  label.field:first-child{ margin-top:0; }
+  input[type=range]{ width:100%; accent-color: var(--accent); background:transparent; }
+  .range-val{ float:right; color:var(--accent); font-family:ui-monospace,monospace; font-size:11px; }
+  input[type=number]{
+    width:100%; background:var(--bg-panel-2); border:1px solid var(--line); color:var(--text);
+    border-radius:6px; padding:8px 10px; font-family:inherit; font-size:13px;
+  }
+  .checkbox-row{ display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--text-dim); margin-top:12px; cursor:pointer; }
+  .checkbox-row input{ accent-color: var(--accent); }
+
+  .palette-row{ display:flex; gap:8px; }
+  .swatch{
+    flex:1; height:40px; border-radius:8px; cursor:pointer; border:2px solid var(--line);
+    padding:0; position:relative; overflow:hidden;
+  }
+  .swatch.active{ border-color:#fff; }
+  .swatch span{
+    position:absolute; bottom:3px; left:0; right:0; text-align:center;
+    font-size:9px; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.8); font-weight:600;
+    text-transform:uppercase; letter-spacing:.04em;
+  }
+
+  .hint{ font-size:11.5px; color:var(--text-dim); line-height:1.6; margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+  .hint b{ color:var(--text); }
+  .footer-space{ flex:1; }
+  .progress-line{ font-size:11px; color:var(--accent); font-family:ui-monospace,monospace; margin-top:10px; min-height:14px; }
+
+  .canvas-wrap{
+    flex:1; position:relative; display:flex; align-items:center; justify-content:center;
+    background: #000000;
+  }
+  .card{
+    background:var(--card-bg); border-radius:10px;
+    box-shadow: 0 20px 70px -10px rgba(255,46,166,.12), 0 0 0 1px rgba(255,255,255,.08);
+    padding: 10px; max-height: 88vh; max-width: 92vw;
+  }
+  svg#stage{ display:block; height: 80vh; width:auto; max-width: 88vw; }
+
+  .top-badge{
+    position:absolute; top:20px; left:20px; font-family:ui-monospace,monospace;
+    font-size:11px; color:#ffffff99; background:#ffffff14; border:1px solid #ffffff1a;
+    padding:6px 10px; border-radius:20px; backdrop-filter: blur(4px);
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="sidebar-head">
+      <div class="eyebrow">Reciprocal Space</div>
+      <h1>Flow Weave</h1>
+      <p>Layered node columns connected by colored strings — generative flow art, inspired by your reference.</p>
+    </div>
+
+    <div class="section">
+      <h2>Generate</h2>
+      <button class="btn-primary" id="btn-shuffle">Shuffle ⟲</button>
+    </div>
+
+    <div class="section">
+      <h2>Palette</h2>
+      <div class="palette-row">
+        <button class="swatch active" data-palette="aurora" style="background:linear-gradient(90deg,#2E6FE0,#B23FE0,#FF2EA6,#FF6F3D);"><span>Aurora</span></button>
+        <button class="swatch" data-palette="ocean" style="background:linear-gradient(90deg,#0B3D91,#22B8CF,#5EE6B0);"><span>Ocean</span></button>
+      </div>
+      <div class="palette-row" style="margin-top:8px;">
+        <button class="swatch" data-palette="sunset" style="background:linear-gradient(90deg,#FF3D68,#FFB703,#6C3FD6);"><span>Sunset</span></button>
+        <button class="swatch" data-palette="mono" style="background:linear-gradient(90deg,#0FF0DC,#0670A8);"><span>Mono</span></button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Composition</h2>
+      <div class="hint" id="composition-hint" style="margin-top:0; padding-top:0; border-top:none;"></div>
+
+      <label class="field">Layout</label>
+      <div class="btn-row-3">
+        <button class="btn-primary" id="btn-mode-horizontal">Horizontal</button>
+        <button class="btn-secondary" id="btn-mode-organic">Organic</button>
+        <button class="btn-secondary" id="btn-mode-complex">Complex</button>
+      </div>
+
+      <label class="field">Targets <span class="range-val" id="val-targets">1</span></label>
+      <input type="range" id="rng-targets" min="1" max="6" value="1">
+
+      <label class="field">Layers <span class="range-val" id="val-layers">5</span></label>
+      <input type="range" id="rng-layers" min="3" max="9" value="5">
+
+      <label class="field">Nodes per layer <span class="range-val" id="val-nodesperlayer">4</span></label>
+      <input type="range" id="rng-nodesperlayer" min="2" max="8" value="4">
+
+      <label class="field">Layer spread <span class="range-val" id="val-layerspread">55</span></label>
+      <input type="range" id="rng-layerspread" min="0" max="100" value="55">
+    </div>
+
+    <div class="section">
+      <h2>Style</h2>
+      <label class="field">Node size <span class="range-val" id="val-nodesize">50</span></label>
+      <input type="range" id="rng-nodesize" min="10" max="100" value="50">
+
+      <label class="field">Line thickness <span class="range-val" id="val-thickness">30</span></label>
+      <input type="range" id="rng-thickness" min="0" max="100" value="30">
+
+      <label class="field">Opacity variation <span class="range-val" id="val-opacityvar">65</span></label>
+      <input type="range" id="rng-opacityvar" min="0" max="100" value="65">
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="chk-animate" checked>
+        Animate glow (start nodes → end nodes)
+      </label>
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="chk-include-bg" checked>
+        Include black background in export
+      </label>
+    </div>
+
+    <div class="section">
+      <h2>Export</h2>
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-export-one">Download .svg</button>
+        <button class="btn-secondary" id="btn-copy-svg">Copy SVG</button>
+      </div>
+      <label class="field">Batch size</label>
+      <input type="number" id="num-batch" min="1" max="30" value="8">
+      <button class="btn-secondary" id="btn-export-batch" style="margin-top:10px;">Generate &amp; download batch (.zip)</button>
+      <div class="progress-line" id="progress"></div>
+    </div>
+
+    <div class="footer-space"></div>
+    <div class="section" style="border-bottom:none;">
+      <div class="hint">
+        Inspired by the reference — a generative recreation, not a pixel trace. <b>Shuffle</b> gives a whole new composition; the sliders and palettes restyle the current one live. <b>Targets</b>, <b>Layers</b> and <b>Nodes per layer</b> default to a clean, sparse composition — raise them to add complexity.
+      </div>
+    </div>
+  </div>
+
+  <div class="canvas-wrap">
+    <div class="top-badge" id="badge">variation 0</div>
+    <div class="card">
+      <svg id="stage" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+
+  // ====================== CONSTANTS ======================
+  const MARGIN = 24;
+  const MARGIN_X = 90;
+  // RULE: three selectable canvas shapes — the original horizontal layout,
+  // a square canvas for the organic look, and a slightly larger square for
+  // the busier complex look.
+  const CANVAS_SIZES = {
+    horizontal: { w: 1600, h: 920 },
+    organic:    { w: 1300, h: 1300 },
+    complex:    { w: 1500, h: 1500 }
+  };
+  let W = CANVAS_SIZES.horizontal.w, H = CANVAS_SIZES.horizontal.h;
+
+  // Per-layout jitter profile: how much a node strays off its column (x, as
+  // a fraction of the gap between layers) and off its slot within the layer
+  // (yMult, as a multiplier on the within-layer gap).
+  const LAYOUT_JITTER = {
+    horizontal: { x: 0,    yMult: 0.16 },
+    organic:    { x: 0.4,  yMult: 0.55 },
+    complex:    { x: 0.65, yMult: 0.85 }
+  };
+
+  // Node-layer composition defaults — a single target (source) node fanning
+  // out over 5 layers, peaking at 4 connected nodes per layer. All three are
+  // adjustable from the sidebar to add complexity; these are just the
+  // sparse, clean starting point.
+  const DEFAULT_TARGETS = 1;
+  const DEFAULT_LAYERS = 5;
+  const DEFAULT_NODES_PER_LAYER = 4;
+
+  let LAYER_COUNTS = [1, 3, 4, 3, 3];
+  let UNATTACHED_COUNTS = [0, 2, 2, 3, 2];
+  let layerX = [];
+  function computeLayerX(){
+    layerX = LAYER_COUNTS.map((_,i) => MARGIN_X + i*(W - 2*MARGIN_X)/(LAYER_COUNTS.length-1));
+  }
+
+  // Builds a symmetric hump-shaped layer-count profile from the three
+  // Composition sliders: layer 0 always holds exactly `targets` nodes; the
+  // remaining layers ramp up toward `nodesPerLayer` around the middle and
+  // taper toward the edges (never below 2). Unattached (hollow) nodes per
+  // layer scale off the connected count, same as the original fixed shape.
+  function buildLayerCounts(targets, numLayers, nodesPerLayer){
+    const counts = [targets];
+    const tailLen = numLayers - 1;
+    const centerK = Math.round((tailLen - 1) / 2);
+    const halfRange = Math.max(centerK, tailLen - 1 - centerK, 1);
+    for(let k=0; k<tailLen; k++){
+      const dist = Math.abs(k - centerK) / halfRange;
+      let c = Math.round(nodesPerLayer - dist * Math.max(0, nodesPerLayer - 2));
+      c = Math.max(2, Math.min(nodesPerLayer, c));
+      counts.push(c);
+    }
+    const unattached = counts.map((c,i) => i === 0 ? 0 : Math.max(0, Math.round(c*0.6)));
+    return { counts, unattached };
+  }
+
+  // RULE: every line shares the exact same gradient (not per-line random
+  // color picks) — this is the ordered left-to-right stop sequence per palette.
+  const GRADIENT_STOPS = {
+    aurora: ['#2E6FE0','#6C3FD6','#FF2EA6','#FF6F3D'],
+    ocean:  ['#0B3D91','#1E6FD9','#22B8CF','#5EE6B0'],
+    sunset: ['#FF3D68','#FF6F3D','#FFB703','#B23FE0'],
+    mono:   ['#0FF0DC','#17D1E8','#0C9BC7','#0A3F73']
+  };
+  // RULE: variable transparency across the shared gradient, so it isn't a
+  // flat wash — faint at the tips, brightest through the middle/neck.
+  const OPACITY_ENVELOPE = [0.2, 0.95, 0.95, 0.3];
+
+  // RULE: animated glow travel timing — one stage per gap between layers.
+  // NUM_STAGES/CYCLE depend on the (now adjustable) layer count, so they're
+  // recomputed in generateLayout() rather than fixed once at load.
+  const STAGE_DUR = 1.0, STAGE_PAUSE = 0.6;
+  let NUM_STAGES = LAYER_COUNTS.length - 1;
+  let CYCLE = NUM_STAGES * STAGE_DUR + STAGE_PAUSE;
+  const arrivalFrac = (layerIndex) => (layerIndex * STAGE_DUR) / CYCLE;
+
+  // ====================== STATE ======================
+  let layoutMode = 'horizontal'; // 'horizontal' | 'organic' | 'complex'
+  let targetsCount = DEFAULT_TARGETS;
+  let numLayers = DEFAULT_LAYERS;
+  let nodesPerLayer = DEFAULT_NODES_PER_LAYER;
+  let layers = [];       // array of arrays of y-positions, one per layer
+  let unattached = [];   // array of arrays of y-positions — visible, unconnected
+  let lines = [];        // {x0,y0,x1,y1,bow} — flattened, one per connection between adjacent layers
+  let stageLines = [];   // same connections grouped per stage — [stage][edge], used to keep glow pulses aligned with the actual drawn lines
+  let currentPalette = 'aurora';
+  let variationCount = 0;
+
+  const stage = document.getElementById('stage');
+  const badge = document.getElementById('badge');
+
+  // ====================== GENERATION ======================
+  function shuffleArr(arr){
+    for(let i=arr.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [arr[i],arr[j]] = [arr[j],arr[i]];
+    }
+    return arr;
+  }
+
+  // ---- color interpolation, for sampling a layer's color off the shared
+  // gradient (used to light nodes up in the color of their section) ----
+  function hexToRgb(hex){
+    hex = hex.replace('#','');
+    return [parseInt(hex.substr(0,2),16), parseInt(hex.substr(2,2),16), parseInt(hex.substr(4,2),16)];
+  }
+  function rgbToHex(rgb){
+    return '#' + rgb.map(v => Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join('');
+  }
+  function sampleGradient(colors, t){
+    if(t <= 0) return colors[0];
+    if(t >= 1) return colors[colors.length-1];
+    const n = colors.length - 1;
+    for(let i=0;i<n;i++){
+      const t0 = i/n, t1 = (i+1)/n;
+      if(t >= t0 && t <= t1){
+        const localT = (t-t0)/(t1-t0);
+        const a = hexToRgb(colors[i]), b = hexToRgb(colors[i+1]);
+        return rgbToHex(a.map((v,k)=> v + (b[k]-v)*localT));
+      }
+    }
+    return colors[colors.length-1];
+  }
+
+  // ---- SMIL keyframe envelopes for the traveling-glow animation ----
+  // generic envelope builder: takes [time, value] points (0–1), filters out
+  // any non-increasing times, and pads the ends so the first/last value
+  // holds through 0 and 1 — every other envelope below is built from this.
+  function buildEnvelope(points){
+    const kt = [], vals = [];
+    points.forEach(([t,v]) => {
+      t = Math.max(0, Math.min(1, t));
+      if(kt.length && t <= kt[kt.length-1] + 1e-6) return;
+      kt.push(t); vals.push(v);
+    });
+    if(kt.length === 0){ kt.push(0); vals.push(points.length ? points[0][1] : 0); }
+    if(kt[0] > 0){ kt.unshift(0); vals.unshift(vals[0]); }
+    if(kt[kt.length-1] < 1){ kt.push(1); vals.push(vals[vals.length-1]); }
+    return { keyTimes: kt.join(';'), values: vals.join(';') };
+  }
+  // a value that holds vStart, sweeps to vEnd during [t0,t1], then holds —
+  // used to sweep the traveling dash smoothly along one line segment,
+  // always landing exactly on the node at both ends (never off-path)
+  function sweepEnvelope(t0, t1, vStart, vEnd){
+    return buildEnvelope([[t0, vStart], [t1, vEnd]]);
+  }
+  // a brief bump up to a peak value right at arrival, then back to base —
+  // used for a node's radius when the glow passes through it
+  function bumpEnvelope(arrivalT, bumpWidth, baseVal, peakVal){
+    const pts = arrivalT > 0 ? [[0, baseVal], [arrivalT, peakVal]] : [[0, peakVal]];
+    pts.push([Math.min(1, arrivalT + bumpWidth), baseVal]);
+    return buildEnvelope(pts);
+  }
+  // RULE: a node only holds its section's color briefly, then reverts to
+  // white — not a permanent tint. Discrete (not eased), same shape as the
+  // radius bump so color and size settle back together.
+  function litEnvelope(arrivalT, holdWidth, baseColor, litColor){
+    const pts = arrivalT > 0 ? [[0, baseColor], [arrivalT, litColor]] : [[0, litColor]];
+    pts.push([Math.min(1, arrivalT + holdWidth), baseColor]);
+    return buildEnvelope(pts);
+  }
+  // RULE: the glow should read as one continuous pass, not stop-start at
+  // each node — fades a segment's pulse in slightly BEFORE it starts moving
+  // and out slightly AFTER it finishes, so consecutive segments overlap for
+  // a brief moment right at the shared node instead of both going dark.
+  // peakOpacity keeps the glow translucent rather than solid white.
+  function pulseOpacityEnvelope(t0, t1, crossfade, peakOpacity){
+    const preFade = Math.max(0, t0 - crossfade);
+    const postFade = Math.min(1, t1 + crossfade);
+    const pts = [];
+    if(preFade > 0) pts.push([preFade, 0]);
+    pts.push([t0, peakOpacity]);
+    pts.push([t1, peakOpacity]);
+    pts.push([postFade, 0]);
+    return buildEnvelope(pts);
+  }
+
+  // positions for one layer: a single node sits dead-center; layers with
+  // more nodes spread symmetrically around center, y-spacing controlled by
+  // the Layer spread slider. In organic/complex mode nodes also get
+  // x-jitter within their layer's zone, so they cluster loosely instead of
+  // aligning in a straight column.
+  function layerPositions(count, gap, baseX, xJitter){
+    const yJitterMult = LAYOUT_JITTER[layoutMode].yMult;
+    const jitterX = () => xJitter ? (Math.random()-0.5)*xJitter : 0;
+    if(count === 1) return [{ x: baseX + jitterX()*0.4, y: H/2 }];
+    const totalSpan = (count-1)*gap;
+    const startY = H/2 - totalSpan/2;
+    const pts = [];
+    for(let i=0;i<count;i++){
+      const y = startY + i*gap + (Math.random()-0.5)*gap*yJitterMult;
+      pts.push({ x: baseX + jitterX(), y });
+    }
+    return pts;
+  }
+
+  function generateLayout(){
+    const built = buildLayerCounts(targetsCount, numLayers, nodesPerLayer);
+    LAYER_COUNTS = built.counts;
+    UNATTACHED_COUNTS = built.unattached;
+    computeLayerX();
+    NUM_STAGES = LAYER_COUNTS.length - 1;
+    CYCLE = NUM_STAGES * STAGE_DUR + STAGE_PAUSE;
+
+    const spreadVal = parseFloat(document.getElementById('rng-layerspread').value) / 100;
+    const gap = 55 + spreadVal * 90; // 55–145px between nodes within a layer
+    const layerSpacing = (W - 2*MARGIN_X) / (LAYER_COUNTS.length-1);
+    const jitterCfg = LAYOUT_JITTER[layoutMode];
+    const xJitter = jitterCfg.x ? layerSpacing * jitterCfg.x : 0;
+
+    // RULE: unattached nodes sit in the same evenly-spaced sequence as the
+    // connected ones (not scattered separately) — generate every slot for
+    // a layer together, then randomly designate which slots are connected.
+    layers = [];
+    unattached = [];
+    LAYER_COUNTS.forEach((connectedCount, li) => {
+      const unattachedCount = UNATTACHED_COUNTS[li];
+      const total = connectedCount + unattachedCount;
+      const allPts = layerPositions(total, gap, layerX[li], xJitter);
+      const slotOrder = shuffleArr(Array.from({length: total}, (_,i)=>i));
+      const connectedSlots = new Set(slotOrder.slice(0, connectedCount));
+      const connectedPts = [], unattachedPts = [];
+      allPts.forEach((pt,i) => {
+        if(connectedSlots.has(i)) connectedPts.push(pt); else unattachedPts.push(pt);
+      });
+      layers.push(connectedPts);
+      unattached.push(unattachedPts);
+    });
+
+    // RULE: not every node connects to every node — each node connects to
+    // at most 2 nodes in the neighboring layer, while every attached node
+    // still ends up with at least one connection (so "attached" nodes never
+    // look identical to the hollow "unattached" ones).
+    // Kept per-stage (not just flattened) so the animated glow can travel
+    // along exactly the same connections that are actually drawn.
+    stageLines = [];
+    for(let li=0; li<layers.length-1; li++){
+      stageLines.push(buildStageLines(layers[li], layers[li+1]));
+    }
+    lines = stageLines.flat();
+
+    updateCompositionHint();
+  }
+
+  // sparse bipartite connections between one layer's points and the next's:
+  // each node picks 1–2 partners (max 2), then any node left with zero
+  // connections gets one forced connection so nothing ends up orphaned.
+  function buildStageLines(fromPts, toPts){
+    const F = fromPts.length, T = toPts.length;
+    const fromDeg = new Array(F).fill(0);
+    const toDeg = new Array(T).fill(0);
+    const seen = new Set();
+    const edges = [];
+
+    function tryConnect(fi, ti){
+      const key = fi + '-' + ti;
+      if(seen.has(key) || fromDeg[fi] >= 2 || toDeg[ti] >= 2) return false;
+      seen.add(key);
+      edges.push([fi, ti]);
+      fromDeg[fi]++; toDeg[ti]++;
+      return true;
+    }
+
+    // each "from" node picks 1 or 2 partners (capped at 2)
+    shuffleArr(Array.from({length:F}, (_,i)=>i)).forEach(fi => {
+      const degree = Math.min(T, 1 + (Math.random() < 0.5 ? 1 : 0));
+      const candidates = shuffleArr(Array.from({length:T}, (_,i)=>i));
+      let picked = 0;
+      for(const ti of candidates){
+        if(picked >= degree) break;
+        if(tryConnect(fi, ti)) picked++;
+      }
+    });
+
+    // guarantee every "to" node has at least one connection
+    shuffleArr(Array.from({length:T}, (_,i)=>i)).forEach(ti => {
+      if(toDeg[ti] > 0) return;
+      const underCap = shuffleArr(Array.from({length:F}, (_,i)=>i)).filter(fi => fromDeg[fi] < 2);
+      if(underCap.length){ tryConnect(underCap[0], ti); }
+      else {
+        // structurally forced (e.g. a single first-layer node reaching
+        // several next-layer nodes) — connect anyway, just past the usual
+        // cap of 2
+        const fi = Math.floor(Math.random()*F);
+        const key = fi+'-'+ti;
+        if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
+      }
+    });
+
+    // guarantee every "from" node has at least one connection
+    shuffleArr(Array.from({length:F}, (_,i)=>i)).forEach(fi => {
+      if(fromDeg[fi] > 0) return;
+      const underCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < 2);
+      if(underCap.length){ tryConnect(fi, underCap[0]); }
+      else {
+        const ti = Math.floor(Math.random()*T);
+        const key = fi+'-'+ti;
+        if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
+      }
+    });
+
+    // RULE: in Complex layout mode, lines also get a small random bow (a
+    // vertical offset on their bezier control points) so the weave reads as
+    // busier/wavier rather than clean straight S-curves.
+    return edges.map(([fi,ti]) => ({
+      x0: fromPts[fi].x, y0: fromPts[fi].y,
+      x1: toPts[ti].x, y1: toPts[ti].y,
+      bow: layoutMode === 'complex' ? (Math.random()-0.5)*70 : 0
+    }));
+  }
+
+  // shared bezier path builder for a connection — used identically for the
+  // base line and its traveling glow pulse, so the two always match exactly.
+  function pathD(l){
+    const midX = (l.x0+l.x1)/2;
+    const bow = l.bow || 0;
+    return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} C${midX.toFixed(1)},${(l.y0+bow).toFixed(1)} ${midX.toFixed(1)},${(l.y1-bow).toFixed(1)} ${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
+  }
+
+  function updateCompositionHint(){
+    const el = document.getElementById('composition-hint');
+    if(!el) return;
+    const chain = LAYER_COUNTS.join(' → ');
+    const extra = UNATTACHED_COUNTS.slice(1).join(', ');
+    el.innerHTML = `<b>${LAYER_COUNTS.length}</b> node layers: <b>${chain}</b>, each node linking to at most 2 nodes in the next layer. Layers 2–${LAYER_COUNTS.length} also carry <b>${extra}</b> extra unattached nodes, shown hollow.`;
+  }
+
+  // ====================== RENDER ======================
+  function render(){
+    const thickness = 0.4 + parseFloat(document.getElementById('rng-thickness').value)/100 * 2.0;
+    const includeBg = document.getElementById('chk-include-bg').checked;
+    const opacityVar = parseFloat(document.getElementById('rng-opacityvar').value) / 100;
+    const animateOn = document.getElementById('chk-animate').checked;
+    const flatOpacity = 0.82;
+
+    // RULE: one shared gradient, identical for every line — anchored to the
+    // full diagram's absolute x-span (layer 1 to the last layer) in
+    // userSpaceOnUse, so each stage's lines show only their own slice of the
+    // overall left-to-right color story instead of replaying the whole
+    // gradient.
+    const gradX0 = layerX[0], gradX1 = layerX[layerX.length-1];
+    const stops = GRADIENT_STOPS[currentPalette];
+    const stopMarkup = stops.map((c,i) => {
+      const env = OPACITY_ENVELOPE[i % OPACITY_ENVELOPE.length];
+      const op = flatOpacity*(1-opacityVar) + env*opacityVar;
+      return `<stop offset="${(i/(stops.length-1)*100).toFixed(1)}%" stop-color="${c}" stop-opacity="${op.toFixed(2)}"/>`;
+    }).join('');
+    let defs = `<linearGradient id="fw-shared" gradientUnits="userSpaceOnUse" x1="${gradX0}" y1="0" x2="${gradX1}" y2="0">${stopMarkup}</linearGradient>`;
+    if(animateOn){
+      defs += `<filter id="fw-glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
+    }
+
+    // RULE: each layer's color is sampled off the shared gradient at that
+    // layer's position — e.g. an early layer lands near the purple stop, the
+    // last layer lands exactly on the final (orange) stop.
+    const layerColors = LAYER_COUNTS.map((_,i) => sampleGradient(stops, i/(LAYER_COUNTS.length-1)));
+
+    let paths = '';
+    lines.forEach((l)=>{
+      paths += `<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`;
+    });
+
+    // RULE: an animated glow travels from the first layer to the last, sweeping
+    // along each line during that stage's window in the cycle — seamlessly,
+    // with each segment's pulse handing off to the next right at the shared
+    // node rather than vanishing and reappearing. Uses the exact same sparse
+    // edge list as the base lines above, so a pulse only ever travels where
+    // a line is actually drawn.
+    let pulseMk = '';
+    if(animateOn){
+      const DASH_LEN = 0.09;               // fraction of the segment's own length
+      const CROSSFADE = 0.045;              // fraction of the full cycle, for the handoff overlap
+      const PULSE_OPACITY = 0.5;            // translucent, not solid white
+      for(let li=0; li<stageLines.length; li++){
+        const t0 = arrivalFrac(li), t1 = arrivalFrac(li+1);
+        // dash offset stays within the visible [0, -(1-DASH_LEN)] range the
+        // whole time, so it's exactly at the start node at t0 and exactly
+        // at the end node at t1 — never off-path, never invisible mid-sweep
+        const sweep = sweepEnvelope(t0, t1, 0, -(1-DASH_LEN));
+        const fade = pulseOpacityEnvelope(t0, t1, CROSSFADE, PULSE_OPACITY);
+        stageLines[li].forEach(l => {
+          pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
+        });
+      }
+    }
+
+    let nodesMk = '';
+    const COLOR_HOLD = 0.32; // fraction of cycle a node stays tinted before reverting to white
+    const sizeScale = parseFloat(document.getElementById('rng-nodesize').value) / 50; // 0–2×, default 1×
+
+    function diamondPoints(cx, cy, r){
+      return `${cx.toFixed(1)},${(cy-r).toFixed(1)} ${(cx+r).toFixed(1)},${cy.toFixed(1)} ${cx.toFixed(1)},${(cy+r).toFixed(1)} ${(cx-r).toFixed(1)},${cy.toFixed(1)}`;
+    }
+
+    layers.forEach((layer, li) => {
+      const litColor = layerColors[li];
+      const haloR = 9*sizeScale, dotR = 4*sizeScale;
+      layer.forEach(pt => {
+        const x = pt.x, y = pt.y;
+        // RULE: the very first layer's nodes render as diamonds, not circles.
+        if(li === 0){
+          if(!animateOn){
+            nodesMk += `<polygon points="${diamondPoints(x,y,haloR)}" fill="#ffffff" opacity="0.14"/>`;
+            nodesMk += `<polygon points="${diamondPoints(x,y,dotR)}" fill="#ffffff" opacity="0.95"/>`;
+            return;
+          }
+          const colorEnv = litEnvelope(0, COLOR_HOLD, '#ffffff', litColor);
+          nodesMk += `<polygon points="${diamondPoints(x,y,haloR)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
+          nodesMk += `<polygon points="${diamondPoints(x,y,dotR)}" fill="#ffffff" opacity="0.95"><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
+          return;
+        }
+        if(!animateOn){
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="#ffffff" opacity="0.14"/>`;
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"/>`;
+          return;
+        }
+        const af = arrivalFrac(li);
+        const haloEnv = bumpEnvelope(af, 0.32, haloR, haloR*1.9);
+        const dotEnv = bumpEnvelope(af, 0.32, dotR, dotR*1.65);
+        // RULE: every node — including the source — only holds its color
+        // briefly when the glow passes, then reverts to white.
+        const colorEnv = litEnvelope(af, COLOR_HOLD, '#ffffff', litColor);
+        nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="r" keyTimes="${haloEnv.keyTimes}" values="${haloEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
+        nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"><animate attributeName="r" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
+      });
+    });
+
+    // RULE: unattached nodes are visible but never touched by a line —
+    // drawn hollow and faint so they read as separate from the flow.
+    unattached.forEach((pts) => {
+      pts.forEach(pt => {
+        nodesMk += `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(7*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.22"/>`;
+        nodesMk += `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(3.4*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1.3" opacity="0.5"/>`;
+      });
+    });
+
+    const bg = includeBg ? `<rect x="0" y="0" width="${W}" height="${H}" fill="#000000"/>` : '';
+
+    stage.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    stage.innerHTML = `<defs>${defs}</defs>${bg}<g>${paths}</g><g>${pulseMk}</g><g>${nodesMk}</g>`;
+  }
+
+  function fullRegenerate(){
+    generateLayout();
+    variationCount++;
+    badge.textContent = `variation ${variationCount}`;
+    render();
+  }
+
+  // ====================== EXPORT ======================
+  function serializeCurrentSVG(){
+    const clone = stage.cloneNode(true);
+    clone.removeAttribute('id');
+    return `<?xml version="1.0" encoding="UTF-8"?>\n` + new XMLSerializer().serializeToString(clone);
+  }
+
+  function download(filename, content, type){
+    const blob = new Blob([content], {type});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ====================== UI WIRING ======================
+  document.getElementById('btn-shuffle').addEventListener('click', fullRegenerate);
+
+  document.querySelectorAll('.swatch').forEach(btn=>{
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.swatch').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      currentPalette = btn.getAttribute('data-palette');
+      render();
+    });
+  });
+
+  document.getElementById('rng-targets').addEventListener('change', () => {
+    targetsCount = parseInt(document.getElementById('rng-targets').value, 10);
+    fullRegenerate();
+  });
+  document.getElementById('rng-targets').addEventListener('input', (e) => {
+    document.getElementById('val-targets').textContent = e.target.value;
+  });
+
+  document.getElementById('rng-layers').addEventListener('change', () => {
+    numLayers = parseInt(document.getElementById('rng-layers').value, 10);
+    fullRegenerate();
+  });
+  document.getElementById('rng-layers').addEventListener('input', (e) => {
+    document.getElementById('val-layers').textContent = e.target.value;
+  });
+
+  document.getElementById('rng-nodesperlayer').addEventListener('change', () => {
+    nodesPerLayer = parseInt(document.getElementById('rng-nodesperlayer').value, 10);
+    fullRegenerate();
+  });
+  document.getElementById('rng-nodesperlayer').addEventListener('input', (e) => {
+    document.getElementById('val-nodesperlayer').textContent = e.target.value;
+  });
+
+  document.getElementById('rng-layerspread').addEventListener('change', () => {
+    document.getElementById('val-layerspread').textContent = document.getElementById('rng-layerspread').value;
+    fullRegenerate();
+  });
+  document.getElementById('rng-layerspread').addEventListener('input', (e) => {
+    document.getElementById('val-layerspread').textContent = e.target.value;
+  });
+
+  document.getElementById('rng-nodesize').addEventListener('input', (e) => {
+    document.getElementById('val-nodesize').textContent = e.target.value;
+    render();
+  });
+
+  document.getElementById('rng-thickness').addEventListener('input', (e) => {
+    document.getElementById('val-thickness').textContent = e.target.value;
+    render();
+  });
+
+  document.getElementById('rng-opacityvar').addEventListener('input', (e) => {
+    document.getElementById('val-opacityvar').textContent = e.target.value;
+    render();
+  });
+
+  document.getElementById('chk-animate').addEventListener('change', render);
+  document.getElementById('chk-include-bg').addEventListener('change', render);
+
+  document.getElementById('btn-export-one').addEventListener('click', () => {
+    download(`flow_weave_${variationCount}.svg`, serializeCurrentSVG(), 'image/svg+xml');
+  });
+
+  document.getElementById('btn-copy-svg').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-copy-svg');
+    const original = btn.textContent;
+    try{
+      await navigator.clipboard.writeText(serializeCurrentSVG());
+      btn.textContent = 'Copied ✓';
+    }catch(err){
+      const ta = document.createElement('textarea');
+      ta.value = serializeCurrentSVG();
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try{ document.execCommand('copy'); btn.textContent = 'Copied ✓'; }
+      catch(err2){ btn.textContent = 'Copy failed'; }
+      document.body.removeChild(ta);
+    }
+    setTimeout(()=>{ btn.textContent = original; }, 1500);
+  });
+
+  document.getElementById('btn-export-batch').addEventListener('click', async () => {
+    const n = Math.max(1, Math.min(30, parseInt(document.getElementById('num-batch').value) || 1));
+    const progress = document.getElementById('progress');
+    const zip = new JSZip();
+    for(let i=1;i<=n;i++){
+      progress.textContent = `Generating ${i} / ${n}…`;
+      await new Promise(r=>setTimeout(r,0));
+      fullRegenerate();
+      zip.file(`flow_weave_${String(i).padStart(2,'0')}.svg`, serializeCurrentSVG());
+    }
+    progress.textContent = 'Zipping…';
+    const blob = await zip.generateAsync({type:'blob'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'flow_weave_variations.zip';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    progress.textContent = `Done — ${n} files exported.`;
+    setTimeout(()=>{ progress.textContent=''; }, 4000);
+  });
+
+  document.getElementById('btn-mode-horizontal').addEventListener('click', () => setLayoutMode('horizontal'));
+  document.getElementById('btn-mode-organic').addEventListener('click', () => setLayoutMode('organic'));
+  document.getElementById('btn-mode-complex').addEventListener('click', () => setLayoutMode('complex'));
+
+  function setLayoutMode(mode){
+    if(mode === layoutMode) return;
+    layoutMode = mode;
+    ['horizontal','organic','complex'].forEach(m => {
+      document.getElementById('btn-mode-'+m).className = (m === mode) ? 'btn-primary' : 'btn-secondary';
+    });
+    const size = CANVAS_SIZES[mode];
+    W = size.w; H = size.h;
+    computeLayerX();
+    fullRegenerate();
+  }
+
+  // ====================== INIT ======================
+  computeLayerX();
+  fullRegenerate();
+
+})();
+</script>
+</body>
+</html>
