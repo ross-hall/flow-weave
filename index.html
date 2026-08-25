@@ -137,19 +137,19 @@
 
       <label class="field">Layout</label>
       <div class="btn-row-3">
-        <button class="btn-primary" id="btn-mode-horizontal">Horizontal</button>
+        <button class="btn-primary" id="btn-mode-simple">Simple</button>
         <button class="btn-secondary" id="btn-mode-organic">Organic</button>
         <button class="btn-secondary" id="btn-mode-complex">Complex</button>
       </div>
 
       <label class="field">Targets <span class="range-val" id="val-targets">1</span></label>
-      <input type="range" id="rng-targets" min="1" max="6" value="1">
+      <input type="range" id="rng-targets" min="1" max="8" value="1">
 
       <label class="field">Layers <span class="range-val" id="val-layers">5</span></label>
-      <input type="range" id="rng-layers" min="3" max="9" value="5">
+      <input type="range" id="rng-layers" min="3" max="12" value="5">
 
       <label class="field">Nodes per layer <span class="range-val" id="val-nodesperlayer">4</span></label>
-      <input type="range" id="rng-nodesperlayer" min="2" max="8" value="4">
+      <input type="range" id="rng-nodesperlayer" min="2" max="10" value="4">
 
       <label class="field">Layer spread <span class="range-val" id="val-layerspread">55</span></label>
       <input type="range" id="rng-layerspread" min="0" max="100" value="55">
@@ -192,7 +192,7 @@
     <div class="footer-space"></div>
     <div class="section" style="border-bottom:none;">
       <div class="hint">
-        Inspired by the reference — a generative recreation, not a pixel trace. <b>Shuffle</b> gives a whole new composition; the sliders and palettes restyle the current one live. <b>Targets</b>, <b>Layers</b> and <b>Nodes per layer</b> default to a clean, sparse composition — raise them to add complexity.
+        Inspired by the reference — a generative recreation, not a pixel trace. <b>Shuffle</b> gives a whole new composition; the sliders and palettes restyle the current one live. <b>Simple</b> resets Targets/Layers/Nodes per layer to a clean, sparse default; <b>Complex</b> jumps straight to a dense preset with denser connections. Fine-tune from either with the sliders.
       </div>
     </div>
   </div>
@@ -211,23 +211,35 @@
   // ====================== CONSTANTS ======================
   const MARGIN = 24;
   const MARGIN_X = 90;
-  // RULE: three selectable canvas shapes — the original horizontal layout,
-  // a square canvas for the organic look, and a slightly larger square for
-  // the busier complex look.
+  // RULE: three selectable canvas shapes — a compact canvas for the clean
+  // Simple layout, a square canvas for the organic look, and a much larger
+  // square for the dense, busy complex look.
   const CANVAS_SIZES = {
-    horizontal: { w: 1600, h: 920 },
-    organic:    { w: 1300, h: 1300 },
-    complex:    { w: 1500, h: 1500 }
+    simple:  { w: 1600, h: 920 },
+    organic: { w: 1300, h: 1300 },
+    complex: { w: 2000, h: 2000 }
   };
-  let W = CANVAS_SIZES.horizontal.w, H = CANVAS_SIZES.horizontal.h;
+  let W = CANVAS_SIZES.simple.w, H = CANVAS_SIZES.simple.h;
 
   // Per-layout jitter profile: how much a node strays off its column (x, as
   // a fraction of the gap between layers) and off its slot within the layer
-  // (yMult, as a multiplier on the within-layer gap).
+  // (yMult, as a multiplier on the within-layer gap). Complex is pushed a
+  // lot further than organic so the two read as distinctly different, not
+  // just "organic but bigger".
   const LAYOUT_JITTER = {
-    horizontal: { x: 0,    yMult: 0.16 },
-    organic:    { x: 0.4,  yMult: 0.55 },
-    complex:    { x: 0.65, yMult: 0.85 }
+    simple:  { x: 0,    yMult: 0.16 },
+    organic: { x: 0.4,  yMult: 0.55 },
+    complex: { x: 1.1,  yMult: 1.5 }
+  };
+
+  // Max edges a single node may fan out to in the next layer. Simple/Organic
+  // keep the original sparse 1–2 edges; Complex allows up to 4, which — on
+  // top of its own larger node counts below — produces a visibly denser,
+  // more tangled mesh of crossing lines.
+  const MAX_DEGREE = {
+    simple: 2,
+    organic: 2,
+    complex: 4
   };
 
   // Node-layer composition defaults — a single target (source) node fanning
@@ -237,6 +249,15 @@
   const DEFAULT_TARGETS = 1;
   const DEFAULT_LAYERS = 5;
   const DEFAULT_NODES_PER_LAYER = 4;
+
+  // RULE: selecting Simple or Complex from the Layout toggle also resets the
+  // Targets/Layers/Nodes-per-layer sliders to that mode's preset — Simple
+  // snaps back to the clean standard composition, Complex jumps straight to
+  // a much denser one. Organic leaves whatever composition is already set.
+  const COMPOSITION_PRESETS = {
+    simple:  { targets: DEFAULT_TARGETS, layers: DEFAULT_LAYERS, nodesPerLayer: DEFAULT_NODES_PER_LAYER },
+    complex: { targets: 4, layers: 9, nodesPerLayer: 8 }
+  };
 
   let LAYER_COUNTS = [1, 3, 4, 3, 3];
   let UNATTACHED_COUNTS = [0, 2, 2, 3, 2];
@@ -286,7 +307,7 @@
   const arrivalFrac = (layerIndex) => (layerIndex * STAGE_DUR) / CYCLE;
 
   // ====================== STATE ======================
-  let layoutMode = 'horizontal'; // 'horizontal' | 'organic' | 'complex'
+  let layoutMode = 'simple'; // 'simple' | 'organic' | 'complex'
   let targetsCount = DEFAULT_TARGETS;
   let numLayers = DEFAULT_LAYERS;
   let nodesPerLayer = DEFAULT_NODES_PER_LAYER;
@@ -454,10 +475,12 @@
   }
 
   // sparse bipartite connections between one layer's points and the next's:
-  // each node picks 1–2 partners (max 2), then any node left with zero
-  // connections gets one forced connection so nothing ends up orphaned.
+  // each node picks 1..maxDegree partners (2 for Simple/Organic, up to 4 for
+  // Complex), then any node left with zero connections gets one forced
+  // connection so nothing ends up orphaned.
   function buildStageLines(fromPts, toPts){
     const F = fromPts.length, T = toPts.length;
+    const maxDegree = MAX_DEGREE[layoutMode];
     const fromDeg = new Array(F).fill(0);
     const toDeg = new Array(T).fill(0);
     const seen = new Set();
@@ -465,16 +488,16 @@
 
     function tryConnect(fi, ti){
       const key = fi + '-' + ti;
-      if(seen.has(key) || fromDeg[fi] >= 2 || toDeg[ti] >= 2) return false;
+      if(seen.has(key) || fromDeg[fi] >= maxDegree || toDeg[ti] >= maxDegree) return false;
       seen.add(key);
       edges.push([fi, ti]);
       fromDeg[fi]++; toDeg[ti]++;
       return true;
     }
 
-    // each "from" node picks 1 or 2 partners (capped at 2)
+    // each "from" node picks between 1 and maxDegree partners
     shuffleArr(Array.from({length:F}, (_,i)=>i)).forEach(fi => {
-      const degree = Math.min(T, 1 + (Math.random() < 0.5 ? 1 : 0));
+      const degree = Math.min(T, 1 + Math.floor(Math.random() * maxDegree));
       const candidates = shuffleArr(Array.from({length:T}, (_,i)=>i));
       let picked = 0;
       for(const ti of candidates){
@@ -486,12 +509,12 @@
     // guarantee every "to" node has at least one connection
     shuffleArr(Array.from({length:T}, (_,i)=>i)).forEach(ti => {
       if(toDeg[ti] > 0) return;
-      const underCap = shuffleArr(Array.from({length:F}, (_,i)=>i)).filter(fi => fromDeg[fi] < 2);
+      const underCap = shuffleArr(Array.from({length:F}, (_,i)=>i)).filter(fi => fromDeg[fi] < maxDegree);
       if(underCap.length){ tryConnect(underCap[0], ti); }
       else {
         // structurally forced (e.g. a single first-layer node reaching
         // several next-layer nodes) — connect anyway, just past the usual
-        // cap of 2
+        // cap
         const fi = Math.floor(Math.random()*F);
         const key = fi+'-'+ti;
         if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
@@ -501,7 +524,7 @@
     // guarantee every "from" node has at least one connection
     shuffleArr(Array.from({length:F}, (_,i)=>i)).forEach(fi => {
       if(fromDeg[fi] > 0) return;
-      const underCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < 2);
+      const underCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < maxDegree);
       if(underCap.length){ tryConnect(fi, underCap[0]); }
       else {
         const ti = Math.floor(Math.random()*T);
@@ -510,13 +533,13 @@
       }
     });
 
-    // RULE: in Complex layout mode, lines also get a small random bow (a
+    // RULE: in Complex layout mode, lines also get a large random bow (a
     // vertical offset on their bezier control points) so the weave reads as
-    // busier/wavier rather than clean straight S-curves.
+    // busy and tangled rather than clean, gently-curved S-curves.
     return edges.map(([fi,ti]) => ({
       x0: fromPts[fi].x, y0: fromPts[fi].y,
       x1: toPts[ti].x, y1: toPts[ti].y,
-      bow: layoutMode === 'complex' ? (Math.random()-0.5)*70 : 0
+      bow: layoutMode === 'complex' ? (Math.random()-0.5)*260 : 0
     }));
   }
 
@@ -533,7 +556,8 @@
     if(!el) return;
     const chain = LAYER_COUNTS.join(' → ');
     const extra = UNATTACHED_COUNTS.slice(1).join(', ');
-    el.innerHTML = `<b>${LAYER_COUNTS.length}</b> node layers: <b>${chain}</b>, each node linking to at most 2 nodes in the next layer. Layers 2–${LAYER_COUNTS.length} also carry <b>${extra}</b> extra unattached nodes, shown hollow.`;
+    const maxDegree = MAX_DEGREE[layoutMode];
+    el.innerHTML = `<b>${LAYER_COUNTS.length}</b> node layers: <b>${chain}</b>, each node linking to at most <b>${maxDegree}</b> nodes in the next layer. Layers 2–${LAYER_COUNTS.length} also carry <b>${extra}</b> extra unattached nodes, shown hollow.`;
   }
 
   // ====================== RENDER ======================
@@ -779,19 +803,38 @@
     setTimeout(()=>{ progress.textContent=''; }, 4000);
   });
 
-  document.getElementById('btn-mode-horizontal').addEventListener('click', () => setLayoutMode('horizontal'));
+  document.getElementById('btn-mode-simple').addEventListener('click', () => setLayoutMode('simple'));
   document.getElementById('btn-mode-organic').addEventListener('click', () => setLayoutMode('organic'));
   document.getElementById('btn-mode-complex').addEventListener('click', () => setLayoutMode('complex'));
+
+  // Pushes a composition preset's targets/layers/nodesPerLayer into state
+  // and reflects them on the sliders + their value readouts.
+  function applyCompositionPreset(preset){
+    targetsCount = preset.targets;
+    numLayers = preset.layers;
+    nodesPerLayer = preset.nodesPerLayer;
+    document.getElementById('rng-targets').value = targetsCount;
+    document.getElementById('val-targets').textContent = targetsCount;
+    document.getElementById('rng-layers').value = numLayers;
+    document.getElementById('val-layers').textContent = numLayers;
+    document.getElementById('rng-nodesperlayer').value = nodesPerLayer;
+    document.getElementById('val-nodesperlayer').textContent = nodesPerLayer;
+  }
 
   function setLayoutMode(mode){
     if(mode === layoutMode) return;
     layoutMode = mode;
-    ['horizontal','organic','complex'].forEach(m => {
+    ['simple','organic','complex'].forEach(m => {
       document.getElementById('btn-mode-'+m).className = (m === mode) ? 'btn-primary' : 'btn-secondary';
     });
     const size = CANVAS_SIZES[mode];
     W = size.w; H = size.h;
     computeLayerX();
+    // RULE: Simple and Complex are also composition presets — selecting
+    // either snaps Targets/Layers/Nodes-per-layer to that mode's values.
+    // Organic leaves the current composition alone, only changing the
+    // visual jitter/edge density.
+    if(COMPOSITION_PRESETS[mode]) applyCompositionPreset(COMPOSITION_PRESETS[mode]);
     fullRegenerate();
   }
 
