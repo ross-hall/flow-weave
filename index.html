@@ -151,11 +151,11 @@
         <button class="btn-secondary" id="btn-shape-radial">Radial</button>
       </div>
 
-      <label class="field">Radial center X <span class="range-val" id="val-radial-cx">0</span></label>
-      <input type="range" id="rng-radial-cx" min="-100" max="100" value="0">
+      <label class="field">Nucleus offset X <span class="range-val" id="val-nucleus-offx">0</span></label>
+      <input type="range" id="rng-nucleus-offx" min="-100" max="100" value="0">
 
-      <label class="field">Radial center Y <span class="range-val" id="val-radial-cy">0</span></label>
-      <input type="range" id="rng-radial-cy" min="-100" max="100" value="0">
+      <label class="field">Nucleus offset Y <span class="range-val" id="val-nucleus-offy">0</span></label>
+      <input type="range" id="rng-nucleus-offy" min="-100" max="100" value="0">
 
       <label class="field">Targets <span class="range-val" id="val-targets">1</span></label>
       <input type="range" id="rng-targets" min="1" max="10" value="1">
@@ -207,7 +207,7 @@
     <div class="footer-space"></div>
     <div class="section" style="border-bottom:none;">
       <div class="hint">
-        Inspired by the reference — a generative recreation, not a pixel trace. <b>Shuffle</b> gives a whole new composition; the sliders and palettes restyle the current one live. <b>Density</b>, <b>Style</b> and <b>Shape</b> are all independent — mix any combination. Simple/Complex resets Targets/Layers/Nodes per layer; Structured/Organic controls scatter; <b>Radial</b> arranges layers as rings collapsing into a central nucleus (targets scattered on the outer ring), and its center sliders shift where connections curve toward — centered pulls lines straight in, offset makes them arc/swirl.
+        Inspired by the reference — a generative recreation, not a pixel trace. <b>Shuffle</b> gives a whole new composition; the sliders and palettes restyle the current one live. <b>Density</b>, <b>Style</b> and <b>Shape</b> are all independent — mix any combination. Simple/Complex resets Targets/Layers/Nodes per layer; Structured/Organic controls scatter; <b>Radial</b> arranges layers as rings collapsing into a central nucleus (targets scattered on the outer ring). <b>Nucleus offset</b> actually moves the nucleus off-center — the outer ring stays put, every layer in between drifts proportionally, and connections skew naturally as a result.
       </div>
     </div>
   </div>
@@ -248,24 +248,30 @@
   }
 
   // Per-style jitter profile — purely spatial, never depends on Density.
-  // Linear: x/yMult are how much a node strays off its column/slot.
+  // Linear: x/yMult are how much a node strays off its column/slot — 0 for
+  // Structured keeps those columns perfectly clean.
   // Radial: angleJitterFrac/radiusJitterFrac are how much a node strays off
-  // its exact ring position. Structured keeps both at 0 (clean columns or
-  // clean rings); Organic scatters loosely in whichever Shape is active.
+  // its exact ring position. Unlike Linear, Structured keeps a real
+  // baseline here instead of 0 — a perfectly even, dead-symmetric ring of
+  // nodes reads as a technical wheel diagram, not a cell, so even
+  // "Structured" radial nodes get some organic irregularity. Organic pushes
+  // it much further.
   const STYLE_JITTER = {
-    structured: { x: 0,   yMult: 0.16, angleJitterFrac: 0,    radiusJitterFrac: 0 },
-    organic:    { x: 0.4, yMult: 0.55, angleJitterFrac: 0.55, radiusJitterFrac: 0.05 }
+    structured: { x: 0,   yMult: 0.16, angleJitterFrac: 0.35, radiusJitterFrac: 0.06 },
+    organic:    { x: 0.4, yMult: 0.55, angleJitterFrac: 0.8,  radiusJitterFrac: 0.14 }
   };
 
   // RULE (Radial shape only): targets (layer 0) sit on the outermost, most
   // scattered ring like receptors on a cell membrane — always noticeably
   // scattered, even under Structured style. The last two layers cluster
-  // tightly at the very center as a single "nucleus" blob, distinct from
-  // the smoother ring-to-ring falloff of the layers before them.
-  const RADIAL_TARGET_MIN_ANGLE_JITTER = 0.9;
-  const RADIAL_TARGET_MIN_RADIUS_JITTER = 0.12;
+  // tightly near the nucleus focus point as a single "nucleus" blob,
+  // distinct from the smoother ring-to-ring falloff of the layers before
+  // them.
+  const RADIAL_TARGET_MIN_ANGLE_JITTER = 1.1;
+  const RADIAL_TARGET_MIN_RADIUS_JITTER = 0.2;
   const RADIAL_NUCLEUS_LAYERS = 2;
   const RADIAL_NUCLEUS_RADIUS_FRAC = 0.15; // fraction of outer radius
+  const RADIAL_NUCLEUS_DRIFT_FRAC = 0.6;   // how far the nucleus can drift off the true center, as a fraction of outer radius
 
   // Radius for layer `li` of `totalLayers`, given the canvas's outer radius
   // and the Layer-spread slider (0–1): higher spread pushes the ring-to-
@@ -391,17 +397,17 @@
   let variationCount = 0;
 
   // Radial-only geometry, recomputed in generateLayout() whenever the shape
-  // is 'radial'. radialCenter is always the exact canvas center — only the
-  // curve focal point (radialFocus, computed in render() from the two
-  // "Radial center" sliders) is user-adjustable. Keeping the ring center
-  // fixed while letting the curve-pull focus move is what produces "lines
-  // run straight to center" at offset 0 vs. "lines swirl/arc" at an offset:
-  // every connection's control point gets pulled toward radialFocus, and
-  // when that point diverges from the rings' own center the pull direction
-  // varies per line, reading as a swirl instead of clean spokes.
+  // is 'radial'. radialCenter is the true canvas center, where the outer
+  // (targets) ring is always anchored. The "Nucleus offset X/Y" sliders move
+  // radialNucleusFocus instead — each layer's own ring center is then
+  // interpolated between radialCenter (targets) and radialNucleusFocus (the
+  // last layer), so the nucleus visibly drifts off-center like a real cell
+  // while the outer membrane stays put, and every layer in between drifts
+  // proportionally. This is a real positional change (recomputed by
+  // generateLayout), not just a curve-drawing trick.
   let radialCenter = { x: 0, y: 0 };
   let radialOuterRadius = 0;
-  let radialFocus = { x: 0, y: 0 };
+  let radialNucleusFocus = { x: 0, y: 0 };
 
   const stage = document.getElementById('stage');
   const badge = document.getElementById('badge');
@@ -512,18 +518,21 @@
     return pts;
   }
 
-  // positions for one ring in Radial shape: `count` nodes spaced evenly
-  // around `radius` (centered on the fixed radialCenter), each rotated by
-  // `rotationOffset` so successive rings don't all align into dead-straight
-  // spokes. Layer 0 (targets) always gets a strong minimum scatter
-  // regardless of Style, so targets read like receptors scattered over the
-  // membrane even in Structured mode.
-  function radialLayerPositions(count, radius, isTargets, rotationOffset){
+  // positions for one ring in Radial shape: `count` nodes spread around
+  // `radius`, centered on `center` (that layer's own drifted center — see
+  // generateLayout), each rotated by a fresh random `rotationOffset` so
+  // successive rings never align into dead-straight spokes. Angle spacing
+  // starts even, then every node gets randomized further by angleJitterFrac
+  // (a real baseline even under Structured — see STYLE_JITTER) so it reads
+  // as scattered rather than a mechanical wheel. Layer 0 (targets) always
+  // gets a strong minimum scatter regardless of Style, so targets read like
+  // receptors scattered over the membrane even in Structured mode.
+  function radialLayerPositions(count, radius, isTargets, rotationOffset, center){
     const style = STYLE_JITTER[styleMode];
     const angleJitterFrac = isTargets ? Math.max(style.angleJitterFrac, RADIAL_TARGET_MIN_ANGLE_JITTER) : style.angleJitterFrac;
     const radiusJitterFrac = isTargets ? Math.max(style.radiusJitterFrac, RADIAL_TARGET_MIN_RADIUS_JITTER) : style.radiusJitterFrac;
     const radiusJitterPx = radialOuterRadius * radiusJitterFrac;
-    const pointAt = (r, angle) => ({ x: radialCenter.x + r*Math.cos(angle), y: radialCenter.y + r*Math.sin(angle) });
+    const pointAt = (r, angle) => ({ x: center.x + r*Math.cos(angle), y: center.y + r*Math.sin(angle) });
     if(count === 1) return [pointAt(radius, rotationOffset)];
     const angleStep = (Math.PI*2) / count;
     const pts = [];
@@ -563,14 +572,38 @@
       radialCenter = { x: W/2, y: H/2 };
       radialOuterRadius = Math.min(W, H)/2 - MARGIN;
       const spreadVal = parseFloat(document.getElementById('rng-layerspread').value) / 100;
-      // RULE: each ring gets a random rotation in Organic style so layers
-      // don't all line up into spokes; Structured keeps every ring aligned
-      // at angle 0 for a clean spoke-and-wheel look.
-      const ringRotations = LAYER_COUNTS.map(() => styleMode === 'organic' ? Math.random()*Math.PI*2 : 0);
+
+      // RULE: the "Nucleus offset X/Y" sliders move where the NUCLEUS itself
+      // sits (radialNucleusFocus), not just how connections are drawn. Each
+      // layer's own ring center is interpolated between radialCenter (the
+      // outer/targets ring, always anchored at the true canvas center) and
+      // radialNucleusFocus (the innermost/nucleus layer) — so at offset 0
+      // everything is concentric as before, but any offset makes the
+      // nucleus visibly drift to one side while the outer membrane stays
+      // put, with every layer in between drifting proportionally. That
+      // drift is what makes connections arc/skew — a real structural
+      // asymmetry, not a fake curve pulled toward an unrelated point.
+      const offXpct = parseFloat(document.getElementById('rng-nucleus-offx').value) / 100;
+      const offYpct = parseFloat(document.getElementById('rng-nucleus-offy').value) / 100;
+      radialNucleusFocus = {
+        x: radialCenter.x + offXpct * radialOuterRadius * RADIAL_NUCLEUS_DRIFT_FRAC,
+        y: radialCenter.y + offYpct * radialOuterRadius * RADIAL_NUCLEUS_DRIFT_FRAC
+      };
+
+      // RULE: every ring gets its own fresh random rotation, regardless of
+      // Style — always, not just under Organic — so layers never line up
+      // into a mechanical spoke-and-wheel pattern.
+      const ringRotations = LAYER_COUNTS.map(() => Math.random()*Math.PI*2);
+      const lastLayer = LAYER_COUNTS.length - 1;
       LAYER_COUNTS.forEach((connectedCount, li) => {
         const total = connectedCount + UNATTACHED_COUNTS[li];
         const radius = radialRadiusForLayer(li, LAYER_COUNTS.length, radialOuterRadius, spreadVal);
-        const allPts = radialLayerPositions(total, radius, li === 0, ringRotations[li]);
+        const t = lastLayer > 0 ? li / lastLayer : 0;
+        const layerCenter = {
+          x: radialCenter.x + (radialNucleusFocus.x - radialCenter.x) * t,
+          y: radialCenter.y + (radialNucleusFocus.y - radialCenter.y) * t
+        };
+        const allPts = radialLayerPositions(total, radius, li === 0, ringRotations[li], layerCenter);
         const { connectedPts, unattachedPts } = splitConnectedUnattached(allPts, connectedCount);
         layers.push(connectedPts);
         unattached.push(unattachedPts);
@@ -672,15 +705,26 @@
       }
     });
 
-    // RULE: in Complex density under Linear shape, lines also get a large
-    // random bow (a vertical offset on their bezier control points) so the
-    // weave reads as busy and tangled rather than clean, gently curved
-    // S-curves. Radial shape ignores this — its curve style comes from the
-    // Radial center controls instead (see pathD below).
+    // RULE: every connection gets its own random bow (a perpendicular
+    // offset on its curve control point — see pathD below) so lines read as
+    // organic strings rather than rigid rulers. Linear only bows under
+    // Complex density (kept sparse/clean otherwise, matching the original
+    // "colored strings" look). Radial always bows at least a little
+    // regardless of density — a perfectly straight spoke reads as a
+    // technical diagram, not a cell — and bows noticeably more under
+    // Complex.
+    function randomBow(){
+      if(shapeMode === 'radial'){
+        const baseBow = radialOuterRadius * 0.07;
+        const extraBow = compositionMode === 'complex' ? radialOuterRadius * 0.14 : 0;
+        return (Math.random()-0.5) * 2 * (baseBow + extraBow);
+      }
+      return compositionMode === 'complex' ? (Math.random()-0.5)*260 : 0;
+    }
     return edges.map(([fi,ti]) => ({
       x0: fromPts[fi].x, y0: fromPts[fi].y,
       x1: toPts[ti].x, y1: toPts[ti].y,
-      bow: (shapeMode !== 'radial' && compositionMode === 'complex') ? (Math.random()-0.5)*260 : 0
+      bow: randomBow()
     }));
   }
 
@@ -688,25 +732,25 @@
   // base line and its traveling glow pulse, so the two always match exactly.
   //
   // Linear: a cubic S-curve through the horizontal midpoint, optionally
-  // bowed (see buildStageLines above).
+  // bowed (see buildStageLines above) — unchanged from before.
   //
-  // Radial: a single quadratic control point pulled from the connection's
-  // own midpoint toward radialFocus. At offset 0 (focus = ring center) this
-  // gently bows every connection toward the nucleus. Moved off-center, each
-  // connection's midpoint sits at a different position relative to the
-  // focus, so the pull varies line to line — reading as a swirl/arc around
-  // the focal point rather than uniform spokes.
+  // Radial: a single quadratic control point offset perpendicular to the
+  // connection's own direction by `bow` (random per-edge, see
+  // buildStageLines). Direction-agnostic, so it works the same for a line
+  // running in any direction around the rings, unlike the old approach of
+  // pulling every line toward one shared point.
   function pathD(l){
+    const mx = (l.x0+l.x1)/2, my = (l.y0+l.y1)/2;
+    const bow = l.bow || 0;
     if(shapeMode === 'radial'){
-      const mx = (l.x0+l.x1)/2, my = (l.y0+l.y1)/2;
-      const pull = 0.4;
-      const cx = mx + (radialFocus.x - mx)*pull;
-      const cy = my + (radialFocus.y - my)*pull;
+      if(bow === 0) return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} L${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
+      const dx = l.x1-l.x0, dy = l.y1-l.y0;
+      const len = Math.hypot(dx,dy) || 1;
+      const px = -dy/len, py = dx/len; // unit vector perpendicular to the connection
+      const cx = mx + px*bow, cy = my + py*bow;
       return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
     }
-    const midX = (l.x0+l.x1)/2;
-    const bow = l.bow || 0;
-    return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} C${midX.toFixed(1)},${(l.y0+bow).toFixed(1)} ${midX.toFixed(1)},${(l.y1-bow).toFixed(1)} ${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
+    return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} C${mx.toFixed(1)},${(l.y0+bow).toFixed(1)} ${mx.toFixed(1)},${(l.y1-bow).toFixed(1)} ${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
   }
 
   function updateCompositionHint(){
@@ -728,15 +772,6 @@
     const opacityVar = parseFloat(document.getElementById('rng-opacityvar').value) / 100;
     const animateOn = document.getElementById('chk-animate').checked;
     const flatOpacity = 0.82;
-
-    // Radial center controls only move the curve focal point, never the
-    // rings themselves — read fresh each render since they're cheap to
-    // apply (no re-layout needed) and drag live.
-    if(shapeMode === 'radial'){
-      const offXpct = parseFloat(document.getElementById('rng-radial-cx').value) / 100;
-      const offYpct = parseFloat(document.getElementById('rng-radial-cy').value) / 100;
-      radialFocus = { x: radialCenter.x + offXpct*radialOuterRadius, y: radialCenter.y + offYpct*radialOuterRadius };
-    }
 
     const stops = GRADIENT_STOPS[currentPalette];
     // RULE: one shared gradient, identical for every line.
@@ -926,16 +961,20 @@
     document.getElementById('val-layerspread').textContent = e.target.value;
   });
 
-  // Radial center only moves the curve focal point, not the ring layout —
-  // no re-layout needed, so a live 'input' redraw is enough (matches the
-  // cheap style sliders below, unlike the structural ones above).
-  document.getElementById('rng-radial-cx').addEventListener('input', (e) => {
-    document.getElementById('val-radial-cx').textContent = e.target.value;
-    render();
+  // Nucleus offset actually moves node positions (every layer's ring
+  // center drifts toward it) — structural, like Targets/Layers above, so it
+  // needs a full regenerate rather than just a redraw.
+  document.getElementById('rng-nucleus-offx').addEventListener('change', () => {
+    fullRegenerate();
   });
-  document.getElementById('rng-radial-cy').addEventListener('input', (e) => {
-    document.getElementById('val-radial-cy').textContent = e.target.value;
-    render();
+  document.getElementById('rng-nucleus-offx').addEventListener('input', (e) => {
+    document.getElementById('val-nucleus-offx').textContent = e.target.value;
+  });
+  document.getElementById('rng-nucleus-offy').addEventListener('change', () => {
+    fullRegenerate();
+  });
+  document.getElementById('rng-nucleus-offy').addEventListener('input', (e) => {
+    document.getElementById('val-nucleus-offy').textContent = e.target.value;
   });
 
   document.getElementById('rng-nodesize').addEventListener('input', (e) => {
