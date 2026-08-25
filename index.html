@@ -145,6 +145,18 @@
         <button class="btn-secondary" id="btn-style-organic">Organic</button>
       </div>
 
+      <label class="field">Shape</label>
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-shape-linear">Linear</button>
+        <button class="btn-secondary" id="btn-shape-radial">Radial</button>
+      </div>
+
+      <label class="field">Radial center X <span class="range-val" id="val-radial-cx">0</span></label>
+      <input type="range" id="rng-radial-cx" min="-100" max="100" value="0">
+
+      <label class="field">Radial center Y <span class="range-val" id="val-radial-cy">0</span></label>
+      <input type="range" id="rng-radial-cy" min="-100" max="100" value="0">
+
       <label class="field">Targets <span class="range-val" id="val-targets">1</span></label>
       <input type="range" id="rng-targets" min="1" max="10" value="1">
 
@@ -195,7 +207,7 @@
     <div class="footer-space"></div>
     <div class="section" style="border-bottom:none;">
       <div class="hint">
-        Inspired by the reference — a generative recreation, not a pixel trace. <b>Shuffle</b> gives a whole new composition; the sliders and palettes restyle the current one live. <b>Density</b> (Simple/Complex) and <b>Style</b> (Structured/Organic) are independent — mix any density with any style. Simple resets Targets/Layers/Nodes per layer to a clean default; Complex jumps to a dense, fully-connected preset. Structured keeps nodes in straight columns; Organic scatters them loosely.
+        Inspired by the reference — a generative recreation, not a pixel trace. <b>Shuffle</b> gives a whole new composition; the sliders and palettes restyle the current one live. <b>Density</b>, <b>Style</b> and <b>Shape</b> are all independent — mix any combination. Simple/Complex resets Targets/Layers/Nodes per layer; Structured/Organic controls scatter; <b>Radial</b> arranges layers as rings collapsing into a central nucleus (targets scattered on the outer ring), and its center sliders shift where connections curve toward — centered pulls lines straight in, offset makes them arc/swirl.
       </div>
     </div>
   </div>
@@ -214,30 +226,63 @@
   // ====================== CONSTANTS ======================
   const MARGIN = 24;
   const MARGIN_X = 90;
-  // RULE: Density (Simple/Complex) and Style (Structured/Organic) are two
-  // fully independent axes — any of the four combinations is valid. Density
-  // controls how many nodes/edges exist and how they're wired up; Style
-  // controls only where nodes sit in space (straight columns vs. loose
-  // scatter). Canvas base shape follows Style; Density just scales it up.
+  // RULE: Density (Simple/Complex), Style (Structured/Organic) and Shape
+  // (Linear/Radial) are three fully independent axes — any combination is
+  // valid. Density controls how many nodes/edges exist and how they're
+  // wired up; Style controls only how loosely nodes sit in space; Shape
+  // controls the overall geometry — left-to-right columns vs. concentric
+  // rings around a cell-like nucleus. Canvas base shape follows Style for
+  // Linear (a wide rectangle for Structured, a square for Organic); Radial
+  // is always a square regardless of Style, since rings need equal room in
+  // every direction. Density just scales whichever base up.
   const STYLE_BASE_SIZE = {
     structured: { w: 1600, h: 920 },
     organic:    { w: 1300, h: 1300 }
   };
-  const COMPLEX_SIZE_SCALE = 1.6; // Complex needs more room regardless of style
+  const RADIAL_BASE_SIZE = { w: 1400, h: 1400 };
+  const COMPLEX_SIZE_SCALE = 1.6; // Complex needs more room regardless of style/shape
   function currentCanvasSize(){
-    const base = STYLE_BASE_SIZE[styleMode];
+    const base = shapeMode === 'radial' ? RADIAL_BASE_SIZE : STYLE_BASE_SIZE[styleMode];
     const scale = compositionMode === 'complex' ? COMPLEX_SIZE_SCALE : 1;
     return { w: Math.round(base.w * scale), h: Math.round(base.h * scale) };
   }
 
-  // Per-style jitter profile: how much a node strays off its column (x, as a
-  // fraction of the gap between layers) and off its slot within the layer
-  // (yMult, as a multiplier on the within-layer gap). Purely spatial — does
-  // not depend on Density.
+  // Per-style jitter profile — purely spatial, never depends on Density.
+  // Linear: x/yMult are how much a node strays off its column/slot.
+  // Radial: angleJitterFrac/radiusJitterFrac are how much a node strays off
+  // its exact ring position. Structured keeps both at 0 (clean columns or
+  // clean rings); Organic scatters loosely in whichever Shape is active.
   const STYLE_JITTER = {
-    structured: { x: 0,   yMult: 0.16 },
-    organic:    { x: 0.4, yMult: 0.55 }
+    structured: { x: 0,   yMult: 0.16, angleJitterFrac: 0,    radiusJitterFrac: 0 },
+    organic:    { x: 0.4, yMult: 0.55, angleJitterFrac: 0.55, radiusJitterFrac: 0.05 }
   };
+
+  // RULE (Radial shape only): targets (layer 0) sit on the outermost, most
+  // scattered ring like receptors on a cell membrane — always noticeably
+  // scattered, even under Structured style. The last two layers cluster
+  // tightly at the very center as a single "nucleus" blob, distinct from
+  // the smoother ring-to-ring falloff of the layers before them.
+  const RADIAL_TARGET_MIN_ANGLE_JITTER = 0.9;
+  const RADIAL_TARGET_MIN_RADIUS_JITTER = 0.12;
+  const RADIAL_NUCLEUS_LAYERS = 2;
+  const RADIAL_NUCLEUS_RADIUS_FRAC = 0.15; // fraction of outer radius
+
+  // Radius for layer `li` of `totalLayers`, given the canvas's outer radius
+  // and the Layer-spread slider (0–1): higher spread pushes the ring-to-
+  // -nucleus transition further out, so rings occupy more of the radius
+  // before collapsing inward; lower spread bunches rings near the edge.
+  function radialRadiusForLayer(li, totalLayers, outerRadius, spreadVal){
+    const nucleusRadius = outerRadius * RADIAL_NUCLEUS_RADIUS_FRAC;
+    const nucleusLayers = Math.min(RADIAL_NUCLEUS_LAYERS, Math.max(totalLayers - 1, 0));
+    const ringLayerCount = totalLayers - nucleusLayers;
+    if(li >= ringLayerCount){
+      const nucleusIndex = li - ringLayerCount; // 0 or 1
+      return nucleusRadius * (1 - nucleusIndex * 0.4);
+    }
+    const innerBound = nucleusRadius * (1.4 + spreadVal * 2.2);
+    const t = ringLayerCount > 1 ? li / (ringLayerCount - 1) : 0;
+    return outerRadius - t * (outerRadius - innerBound);
+  }
 
   // Max edges a single node may fan out to in the next layer, purely a
   // function of Density. Simple keeps the original sparse 1–2 edges; Complex
@@ -331,7 +376,8 @@
 
   // ====================== STATE ======================
   let compositionMode = 'simple'; // 'simple' | 'complex' — density/connectivity
-  let styleMode = 'structured';   // 'structured' | 'organic' — spatial arrangement
+  let styleMode = 'structured';   // 'structured' | 'organic' — spatial looseness
+  let shapeMode = 'linear';       // 'linear' | 'radial' — overall geometry
   let W = 0, H = 0;
   ({ w: W, h: H } = currentCanvasSize());
   let targetsCount = DEFAULT_TARGETS;
@@ -343,6 +389,19 @@
   let stageLines = [];   // same connections grouped per stage — [stage][edge], used to keep glow pulses aligned with the actual drawn lines
   let currentPalette = 'aurora';
   let variationCount = 0;
+
+  // Radial-only geometry, recomputed in generateLayout() whenever the shape
+  // is 'radial'. radialCenter is always the exact canvas center — only the
+  // curve focal point (radialFocus, computed in render() from the two
+  // "Radial center" sliders) is user-adjustable. Keeping the ring center
+  // fixed while letting the curve-pull focus move is what produces "lines
+  // run straight to center" at offset 0 vs. "lines swirl/arc" at an offset:
+  // every connection's control point gets pulled toward radialFocus, and
+  // when that point diverges from the rings' own center the pull direction
+  // varies per line, reading as a swirl instead of clean spokes.
+  let radialCenter = { x: 0, y: 0 };
+  let radialOuterRadius = 0;
+  let radialFocus = { x: 0, y: 0 };
 
   const stage = document.getElementById('stage');
   const badge = document.getElementById('badge');
@@ -433,11 +492,12 @@
     return buildEnvelope(pts);
   }
 
-  // positions for one layer: a single node sits dead-center; layers with
-  // more nodes spread symmetrically around center, y-spacing controlled by
-  // the Layer spread slider. In Organic style nodes also get x-jitter within
-  // their layer's zone, so they cluster loosely instead of aligning in a
-  // straight column. Depends only on styleMode, never on compositionMode.
+  // positions for one layer in Linear shape: a single node sits dead-center;
+  // layers with more nodes spread symmetrically around center, y-spacing
+  // controlled by the Layer spread slider. In Organic style nodes also get
+  // x-jitter within their layer's zone, so they cluster loosely instead of
+  // aligning in a straight column. Depends only on styleMode, never on
+  // compositionMode.
   function layerPositions(count, gap, baseX, xJitter){
     const yJitterMult = STYLE_JITTER[styleMode].yMult;
     const jitterX = () => xJitter ? (Math.random()-0.5)*xJitter : 0;
@@ -452,6 +512,42 @@
     return pts;
   }
 
+  // positions for one ring in Radial shape: `count` nodes spaced evenly
+  // around `radius` (centered on the fixed radialCenter), each rotated by
+  // `rotationOffset` so successive rings don't all align into dead-straight
+  // spokes. Layer 0 (targets) always gets a strong minimum scatter
+  // regardless of Style, so targets read like receptors scattered over the
+  // membrane even in Structured mode.
+  function radialLayerPositions(count, radius, isTargets, rotationOffset){
+    const style = STYLE_JITTER[styleMode];
+    const angleJitterFrac = isTargets ? Math.max(style.angleJitterFrac, RADIAL_TARGET_MIN_ANGLE_JITTER) : style.angleJitterFrac;
+    const radiusJitterFrac = isTargets ? Math.max(style.radiusJitterFrac, RADIAL_TARGET_MIN_RADIUS_JITTER) : style.radiusJitterFrac;
+    const radiusJitterPx = radialOuterRadius * radiusJitterFrac;
+    const pointAt = (r, angle) => ({ x: radialCenter.x + r*Math.cos(angle), y: radialCenter.y + r*Math.sin(angle) });
+    if(count === 1) return [pointAt(radius, rotationOffset)];
+    const angleStep = (Math.PI*2) / count;
+    const pts = [];
+    for(let i=0;i<count;i++){
+      const angle = i*angleStep + rotationOffset + (Math.random()-0.5)*angleStep*angleJitterFrac;
+      const r = radius + (Math.random()-0.5)*2*radiusJitterPx;
+      pts.push(pointAt(r, angle));
+    }
+    return pts;
+  }
+
+  // Shared by both shapes: splits `allPts` into connected vs. unattached,
+  // designating slots randomly so unattached nodes sit interleaved rather
+  // than scattered separately.
+  function splitConnectedUnattached(allPts, connectedCount){
+    const slotOrder = shuffleArr(Array.from({length: allPts.length}, (_,i)=>i));
+    const connectedSlots = new Set(slotOrder.slice(0, connectedCount));
+    const connectedPts = [], unattachedPts = [];
+    allPts.forEach((pt,i) => {
+      if(connectedSlots.has(i)) connectedPts.push(pt); else unattachedPts.push(pt);
+    });
+    return { connectedPts, unattachedPts };
+  }
+
   function generateLayout(){
     const built = buildLayerCounts(targetsCount, numLayers, nodesPerLayer);
     LAYER_COUNTS = built.counts;
@@ -460,30 +556,43 @@
     NUM_STAGES = LAYER_COUNTS.length - 1;
     CYCLE = NUM_STAGES * STAGE_DUR + STAGE_PAUSE;
 
-    const spreadVal = parseFloat(document.getElementById('rng-layerspread').value) / 100;
-    const gap = 55 + spreadVal * 90; // 55–145px between nodes within a layer
-    const layerSpacing = (W - 2*MARGIN_X) / (LAYER_COUNTS.length-1);
-    const jitterCfg = STYLE_JITTER[styleMode];
-    const xJitter = jitterCfg.x ? layerSpacing * jitterCfg.x : 0;
-
-    // RULE: unattached nodes sit in the same evenly-spaced sequence as the
-    // connected ones (not scattered separately) — generate every slot for
-    // a layer together, then randomly designate which slots are connected.
     layers = [];
     unattached = [];
-    LAYER_COUNTS.forEach((connectedCount, li) => {
-      const unattachedCount = UNATTACHED_COUNTS[li];
-      const total = connectedCount + unattachedCount;
-      const allPts = layerPositions(total, gap, layerX[li], xJitter);
-      const slotOrder = shuffleArr(Array.from({length: total}, (_,i)=>i));
-      const connectedSlots = new Set(slotOrder.slice(0, connectedCount));
-      const connectedPts = [], unattachedPts = [];
-      allPts.forEach((pt,i) => {
-        if(connectedSlots.has(i)) connectedPts.push(pt); else unattachedPts.push(pt);
+
+    if(shapeMode === 'radial'){
+      radialCenter = { x: W/2, y: H/2 };
+      radialOuterRadius = Math.min(W, H)/2 - MARGIN;
+      const spreadVal = parseFloat(document.getElementById('rng-layerspread').value) / 100;
+      // RULE: each ring gets a random rotation in Organic style so layers
+      // don't all line up into spokes; Structured keeps every ring aligned
+      // at angle 0 for a clean spoke-and-wheel look.
+      const ringRotations = LAYER_COUNTS.map(() => styleMode === 'organic' ? Math.random()*Math.PI*2 : 0);
+      LAYER_COUNTS.forEach((connectedCount, li) => {
+        const total = connectedCount + UNATTACHED_COUNTS[li];
+        const radius = radialRadiusForLayer(li, LAYER_COUNTS.length, radialOuterRadius, spreadVal);
+        const allPts = radialLayerPositions(total, radius, li === 0, ringRotations[li]);
+        const { connectedPts, unattachedPts } = splitConnectedUnattached(allPts, connectedCount);
+        layers.push(connectedPts);
+        unattached.push(unattachedPts);
       });
-      layers.push(connectedPts);
-      unattached.push(unattachedPts);
-    });
+    } else {
+      const spreadVal = parseFloat(document.getElementById('rng-layerspread').value) / 100;
+      const gap = 55 + spreadVal * 90; // 55–145px between nodes within a layer
+      const layerSpacing = (W - 2*MARGIN_X) / (LAYER_COUNTS.length-1);
+      const jitterCfg = STYLE_JITTER[styleMode];
+      const xJitter = jitterCfg.x ? layerSpacing * jitterCfg.x : 0;
+
+      // RULE: unattached nodes sit in the same evenly-spaced sequence as
+      // the connected ones (not scattered separately) — generate every slot
+      // for a layer together, then randomly designate which are connected.
+      LAYER_COUNTS.forEach((connectedCount, li) => {
+        const total = connectedCount + UNATTACHED_COUNTS[li];
+        const allPts = layerPositions(total, gap, layerX[li], xJitter);
+        const { connectedPts, unattachedPts } = splitConnectedUnattached(allPts, connectedCount);
+        layers.push(connectedPts);
+        unattached.push(unattachedPts);
+      });
+    }
 
     // RULE: not every node connects to every node — each node connects to
     // at most 2 nodes in the neighboring layer, while every attached node
@@ -563,20 +672,38 @@
       }
     });
 
-    // RULE: in Complex density (regardless of Style), lines also get a
-    // large random bow (a vertical offset on their bezier control points)
-    // so the weave reads as busy and tangled rather than clean, gently
-    // curved S-curves.
+    // RULE: in Complex density under Linear shape, lines also get a large
+    // random bow (a vertical offset on their bezier control points) so the
+    // weave reads as busy and tangled rather than clean, gently curved
+    // S-curves. Radial shape ignores this — its curve style comes from the
+    // Radial center controls instead (see pathD below).
     return edges.map(([fi,ti]) => ({
       x0: fromPts[fi].x, y0: fromPts[fi].y,
       x1: toPts[ti].x, y1: toPts[ti].y,
-      bow: compositionMode === 'complex' ? (Math.random()-0.5)*260 : 0
+      bow: (shapeMode !== 'radial' && compositionMode === 'complex') ? (Math.random()-0.5)*260 : 0
     }));
   }
 
   // shared bezier path builder for a connection — used identically for the
   // base line and its traveling glow pulse, so the two always match exactly.
+  //
+  // Linear: a cubic S-curve through the horizontal midpoint, optionally
+  // bowed (see buildStageLines above).
+  //
+  // Radial: a single quadratic control point pulled from the connection's
+  // own midpoint toward radialFocus. At offset 0 (focus = ring center) this
+  // gently bows every connection toward the nucleus. Moved off-center, each
+  // connection's midpoint sits at a different position relative to the
+  // focus, so the pull varies line to line — reading as a swirl/arc around
+  // the focal point rather than uniform spokes.
   function pathD(l){
+    if(shapeMode === 'radial'){
+      const mx = (l.x0+l.x1)/2, my = (l.y0+l.y1)/2;
+      const pull = 0.4;
+      const cx = mx + (radialFocus.x - mx)*pull;
+      const cy = my + (radialFocus.y - my)*pull;
+      return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
+    }
     const midX = (l.x0+l.x1)/2;
     const bow = l.bow || 0;
     return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} C${midX.toFixed(1)},${(l.y0+bow).toFixed(1)} ${midX.toFixed(1)},${(l.y1-bow).toFixed(1)} ${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
@@ -602,19 +729,42 @@
     const animateOn = document.getElementById('chk-animate').checked;
     const flatOpacity = 0.82;
 
-    // RULE: one shared gradient, identical for every line — anchored to the
-    // full diagram's absolute x-span (layer 1 to the last layer) in
-    // userSpaceOnUse, so each stage's lines show only their own slice of the
-    // overall left-to-right color story instead of replaying the whole
-    // gradient.
-    const gradX0 = layerX[0], gradX1 = layerX[layerX.length-1];
+    // Radial center controls only move the curve focal point, never the
+    // rings themselves — read fresh each render since they're cheap to
+    // apply (no re-layout needed) and drag live.
+    if(shapeMode === 'radial'){
+      const offXpct = parseFloat(document.getElementById('rng-radial-cx').value) / 100;
+      const offYpct = parseFloat(document.getElementById('rng-radial-cy').value) / 100;
+      radialFocus = { x: radialCenter.x + offXpct*radialOuterRadius, y: radialCenter.y + offYpct*radialOuterRadius };
+    }
+
     const stops = GRADIENT_STOPS[currentPalette];
-    const stopMarkup = stops.map((c,i) => {
-      const env = OPACITY_ENVELOPE[i % OPACITY_ENVELOPE.length];
-      const op = flatOpacity*(1-opacityVar) + env*opacityVar;
-      return `<stop offset="${(i/(stops.length-1)*100).toFixed(1)}%" stop-color="${c}" stop-opacity="${op.toFixed(2)}"/>`;
-    }).join('');
-    let defs = `<linearGradient id="fw-shared" gradientUnits="userSpaceOnUse" x1="${gradX0}" y1="0" x2="${gradX1}" y2="0">${stopMarkup}</linearGradient>`;
+    // RULE: one shared gradient, identical for every line.
+    // Linear: anchored to the full diagram's absolute x-span (layer 1 to
+    // the last layer) in userSpaceOnUse, so each stage's lines show only
+    // their own slice of the overall left-to-right color story instead of
+    // replaying the whole gradient.
+    // Radial: a radialGradient centered on the rings, running from the
+    // outer edge (first color, targets) to the center (last color,
+    // nucleus) — the color story now reads outside-in instead of left-right.
+    let defs;
+    if(shapeMode === 'radial'){
+      const reversedStops = stops.slice().reverse();
+      const stopMarkupR = reversedStops.map((c,i) => {
+        const env = OPACITY_ENVELOPE[i % OPACITY_ENVELOPE.length];
+        const op = flatOpacity*(1-opacityVar) + env*opacityVar;
+        return `<stop offset="${(i/(reversedStops.length-1)*100).toFixed(1)}%" stop-color="${c}" stop-opacity="${op.toFixed(2)}"/>`;
+      }).join('');
+      defs = `<radialGradient id="fw-shared" gradientUnits="userSpaceOnUse" cx="${radialCenter.x}" cy="${radialCenter.y}" r="${radialOuterRadius}">${stopMarkupR}</radialGradient>`;
+    } else {
+      const gradX0 = layerX[0], gradX1 = layerX[layerX.length-1];
+      const stopMarkup = stops.map((c,i) => {
+        const env = OPACITY_ENVELOPE[i % OPACITY_ENVELOPE.length];
+        const op = flatOpacity*(1-opacityVar) + env*opacityVar;
+        return `<stop offset="${(i/(stops.length-1)*100).toFixed(1)}%" stop-color="${c}" stop-opacity="${op.toFixed(2)}"/>`;
+      }).join('');
+      defs = `<linearGradient id="fw-shared" gradientUnits="userSpaceOnUse" x1="${gradX0}" y1="0" x2="${gradX1}" y2="0">${stopMarkup}</linearGradient>`;
+    }
     if(animateOn){
       defs += `<filter id="fw-glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
     }
@@ -776,6 +926,18 @@
     document.getElementById('val-layerspread').textContent = e.target.value;
   });
 
+  // Radial center only moves the curve focal point, not the ring layout —
+  // no re-layout needed, so a live 'input' redraw is enough (matches the
+  // cheap style sliders below, unlike the structural ones above).
+  document.getElementById('rng-radial-cx').addEventListener('input', (e) => {
+    document.getElementById('val-radial-cx').textContent = e.target.value;
+    render();
+  });
+  document.getElementById('rng-radial-cy').addEventListener('input', (e) => {
+    document.getElementById('val-radial-cy').textContent = e.target.value;
+    render();
+  });
+
   document.getElementById('rng-nodesize').addEventListener('input', (e) => {
     document.getElementById('val-nodesize').textContent = e.target.value;
     render();
@@ -841,6 +1003,8 @@
   document.getElementById('btn-comp-complex').addEventListener('click', () => setCompositionMode('complex'));
   document.getElementById('btn-style-structured').addEventListener('click', () => setStyleMode('structured'));
   document.getElementById('btn-style-organic').addEventListener('click', () => setStyleMode('organic'));
+  document.getElementById('btn-shape-linear').addEventListener('click', () => setShapeMode('linear'));
+  document.getElementById('btn-shape-radial').addEventListener('click', () => setShapeMode('radial'));
 
   // Pushes a composition preset's targets/layers/nodesPerLayer into state
   // and reflects them on the sliders + their value readouts.
@@ -880,6 +1044,19 @@
     styleMode = mode;
     ['structured','organic'].forEach(m => {
       document.getElementById('btn-style-'+m).className = (m === mode) ? 'btn-primary' : 'btn-secondary';
+    });
+    ({ w: W, h: H } = currentCanvasSize());
+    computeLayerX();
+    fullRegenerate();
+  }
+
+  // Shape (Linear/Radial) is independent of Density and Style too — it only
+  // changes how positions/curves are computed, never resets any slider.
+  function setShapeMode(mode){
+    if(mode === shapeMode) return;
+    shapeMode = mode;
+    ['linear','radial'].forEach(m => {
+      document.getElementById('btn-shape-'+m).className = (m === mode) ? 'btn-primary' : 'btn-secondary';
     });
     ({ w: W, h: H } = currentCanvasSize());
     computeLayerX();
