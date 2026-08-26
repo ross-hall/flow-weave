@@ -806,6 +806,16 @@
     // Radial: a radialGradient centered on the rings, running from the
     // outer edge (first color, targets) to the center (last color,
     // nucleus) — the color story now reads outside-in instead of left-right.
+    //
+    // Its 0%-stop (nucleus color) is placed at the focal point (fx/fy),
+    // separately from the circle defining the 100%-stop (cx/cy/r). Without
+    // this, both were pinned to the true canvas center — fine at zero
+    // Nucleus offset, but once the nucleus drifts (see generateLayout) the
+    // actual nucleus nodes move while the gradient's color-center didn't,
+    // so that region sampled colors from further out along the (unmoved)
+    // gradient — reading as the targets' color instead of the nucleus's.
+    // Setting fx/fy to radialNucleusFocus keeps the nucleus-colored end of
+    // the gradient following the nucleus itself.
     let defs;
     if(shapeMode === 'radial'){
       const reversedStops = stops.slice().reverse();
@@ -814,7 +824,7 @@
         const op = flatOpacity*(1-opacityVar) + env*opacityVar;
         return `<stop offset="${(i/(reversedStops.length-1)*100).toFixed(1)}%" stop-color="${c}" stop-opacity="${op.toFixed(2)}"/>`;
       }).join('');
-      defs = `<radialGradient id="fw-shared" gradientUnits="userSpaceOnUse" cx="${radialCenter.x}" cy="${radialCenter.y}" r="${radialOuterRadius}">${stopMarkupR}</radialGradient>`;
+      defs = `<radialGradient id="fw-shared" gradientUnits="userSpaceOnUse" cx="${radialCenter.x}" cy="${radialCenter.y}" r="${radialOuterRadius}" fx="${radialNucleusFocus.x}" fy="${radialNucleusFocus.y}">${stopMarkupR}</radialGradient>`;
     } else {
       const gradX0 = layerX[0], gradX1 = layerX[layerX.length-1];
       const stopMarkup = stops.map((c,i) => {
