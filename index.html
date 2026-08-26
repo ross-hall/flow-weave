@@ -187,6 +187,11 @@
       </label>
 
       <label class="checkbox-row">
+        <input type="checkbox" id="chk-permanent-colors">
+        Keep node colors on permanently
+      </label>
+
+      <label class="checkbox-row">
         <input type="checkbox" id="chk-include-bg" checked>
         Include black background in export
       </label>
@@ -527,12 +532,21 @@
   // as scattered rather than a mechanical wheel. Layer 0 (targets) always
   // gets a strong minimum scatter regardless of Style, so targets read like
   // receptors scattered over the membrane even in Structured mode.
+  //
+  // The targets ring sits at radius === radialOuterRadius exactly, so its
+  // (large, guaranteed-minimum) outward jitter can push a point's raw
+  // distance past the canvas edge; a drifted inner layer's own center can
+  // do the same even with a small ring radius. Every point is clamped back
+  // onto the canvas's actual drawable circle (radius radialOuterRadius
+  // around the true center) as a final, unconditional safety net — this is
+  // measured from radialCenter, not the possibly-drifted `center` passed
+  // in, so it holds regardless of jitter/drift combination.
   function radialLayerPositions(count, radius, isTargets, rotationOffset, center){
     const style = STYLE_JITTER[styleMode];
     const angleJitterFrac = isTargets ? Math.max(style.angleJitterFrac, RADIAL_TARGET_MIN_ANGLE_JITTER) : style.angleJitterFrac;
     const radiusJitterFrac = isTargets ? Math.max(style.radiusJitterFrac, RADIAL_TARGET_MIN_RADIUS_JITTER) : style.radiusJitterFrac;
     const radiusJitterPx = radialOuterRadius * radiusJitterFrac;
-    const pointAt = (r, angle) => ({ x: center.x + r*Math.cos(angle), y: center.y + r*Math.sin(angle) });
+    const pointAt = (r, angle) => clampToCanvas({ x: center.x + r*Math.cos(angle), y: center.y + r*Math.sin(angle) });
     if(count === 1) return [pointAt(radius, rotationOffset)];
     const angleStep = (Math.PI*2) / count;
     const pts = [];
@@ -542,6 +556,16 @@
       pts.push(pointAt(r, angle));
     }
     return pts;
+  }
+
+  // Pulls a point back onto the canvas's drawable circle (radius
+  // radialOuterRadius around radialCenter) if it landed outside it.
+  function clampToCanvas(pt){
+    const dx = pt.x - radialCenter.x, dy = pt.y - radialCenter.y;
+    const dist = Math.hypot(dx, dy);
+    if(dist <= radialOuterRadius || dist === 0) return pt;
+    const scale = radialOuterRadius / dist;
+    return { x: radialCenter.x + dx*scale, y: radialCenter.y + dy*scale };
   }
 
   // Shared by both shapes: splits `allPts` into connected vs. unattached,
@@ -841,6 +865,11 @@
     let nodesMk = '';
     const COLOR_HOLD = 0.32; // fraction of cycle a node stays tinted before reverting to white
     const sizeScale = parseFloat(document.getElementById('rng-nodesize').value) / 50; // 0–2×, default 1×
+    // RULE: "Keep node colors on permanently" fixes every node's fill at
+    // its layer color instead of flashing on and fading back to white — the
+    // radius bump (when animated) still plays normally, only the fill
+    // animation is skipped, since there's nothing to animate toward.
+    const permanentColors = document.getElementById('chk-permanent-colors').checked;
 
     function diamondPoints(cx, cy, r){
       return `${cx.toFixed(1)},${(cy-r).toFixed(1)} ${(cx+r).toFixed(1)},${cy.toFixed(1)} ${cx.toFixed(1)},${(cy+r).toFixed(1)} ${(cx-r).toFixed(1)},${cy.toFixed(1)}`;
@@ -849,13 +878,15 @@
     layers.forEach((layer, li) => {
       const litColor = layerColors[li];
       const haloR = 9*sizeScale, dotR = 4*sizeScale;
+      const baseFill = permanentColors ? litColor : '#ffffff';
       layer.forEach(pt => {
         const x = pt.x, y = pt.y;
         // RULE: the very first layer's nodes render as diamonds, not circles.
         if(li === 0){
-          if(!animateOn){
-            nodesMk += `<polygon points="${diamondPoints(x,y,haloR)}" fill="#ffffff" opacity="0.14"/>`;
-            nodesMk += `<polygon points="${diamondPoints(x,y,dotR)}" fill="#ffffff" opacity="0.95"/>`;
+          if(!animateOn || permanentColors){
+            const glowAttr = animateOn ? ' filter="url(#fw-glow)"' : '';
+            nodesMk += `<polygon points="${diamondPoints(x,y,haloR)}" fill="${baseFill}" opacity="0.14"${glowAttr}/>`;
+            nodesMk += `<polygon points="${diamondPoints(x,y,dotR)}" fill="${baseFill}" opacity="0.95"/>`;
             return;
           }
           const colorEnv = litEnvelope(0, COLOR_HOLD, '#ffffff', litColor);
@@ -864,13 +895,18 @@
           return;
         }
         if(!animateOn){
-          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="#ffffff" opacity="0.14"/>`;
-          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"/>`;
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="${baseFill}" opacity="0.14"/>`;
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="${baseFill}" opacity="0.95"/>`;
           return;
         }
         const af = arrivalFrac(li);
         const haloEnv = bumpEnvelope(af, 0.32, haloR, haloR*1.9);
         const dotEnv = bumpEnvelope(af, 0.32, dotR, dotR*1.65);
+        if(permanentColors){
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="${litColor}" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="r" keyTimes="${haloEnv.keyTimes}" values="${haloEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="${litColor}" opacity="0.95"><animate attributeName="r" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
+          return;
+        }
         // RULE: every node — including the source — only holds its color
         // briefly when the glow passes, then reverts to white.
         const colorEnv = litEnvelope(af, COLOR_HOLD, '#ffffff', litColor);
@@ -993,6 +1029,7 @@
   });
 
   document.getElementById('chk-animate').addEventListener('change', render);
+  document.getElementById('chk-permanent-colors').addEventListener('change', render);
   document.getElementById('chk-include-bg').addEventListener('change', render);
 
   document.getElementById('btn-export-one').addEventListener('click', () => {
