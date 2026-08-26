@@ -206,6 +206,11 @@
       <label class="field">Batch size</label>
       <input type="number" id="num-batch" min="1" max="30" value="8">
       <button class="btn-secondary" id="btn-export-batch" style="margin-top:10px;">Generate &amp; download batch (.zip)</button>
+
+      <label class="field" style="margin-top:16px;">Video length (cycles)</label>
+      <input type="number" id="num-video-cycles" min="1" max="6" value="1">
+      <button class="btn-secondary" id="btn-export-video" style="margin-top:10px;">Export video (.webm)</button>
+
       <div class="progress-line" id="progress"></div>
     </div>
 
@@ -450,11 +455,18 @@
     return colors[colors.length-1];
   }
 
-  // ---- SMIL keyframe envelopes for the traveling-glow animation ----
-  // generic envelope builder: takes [time, value] points (0–1), filters out
-  // any non-increasing times, and pads the ends so the first/last value
-  // holds through 0 and 1 — every other envelope below is built from this.
-  function buildEnvelope(points){
+  // ---- keyframe envelopes for the traveling-glow animation ----
+  // Each envelope is built from a raw [time, value] points array via one of
+  // the "xxxPoints" functions below. That array is consumed two ways:
+  // buildEnvelope() turns it into SMIL keyTimes/values strings for live
+  // playback, and sampleEnvelopeAtT() resolves it to a single value at an
+  // arbitrary time — used by the video exporter to render exact, static
+  // "freeze-frame" snapshots of the same animation math, so exported video
+  // frames match the live SMIL playback exactly rather than approximating it.
+  //
+  // generic envelope normalizer: filters out any non-increasing times and
+  // pads the ends so the first/last value holds through 0 and 1.
+  function normalizeEnvelope(points){
     const kt = [], vals = [];
     points.forEach(([t,v]) => {
       t = Math.max(0, Math.min(1, t));
@@ -464,35 +476,68 @@
     if(kt.length === 0){ kt.push(0); vals.push(points.length ? points[0][1] : 0); }
     if(kt[0] > 0){ kt.unshift(0); vals.unshift(vals[0]); }
     if(kt[kt.length-1] < 1){ kt.push(1); vals.push(vals[vals.length-1]); }
+    return { kt, vals };
+  }
+  function buildEnvelope(points){
+    const { kt, vals } = normalizeEnvelope(points);
     return { keyTimes: kt.join(';'), values: vals.join(';') };
   }
+  // Resolves a points array to the value active at time t (0–1). Numeric
+  // values interpolate linearly between keyframes (matching SMIL's default
+  // calcMode); pass discrete:true (or a non-numeric value, e.g. a color
+  // string) to hold each segment's starting value instead, matching
+  // calcMode="discrete".
+  function sampleEnvelopeAtT(points, t, discrete){
+    const { kt, vals } = normalizeEnvelope(points);
+    t = Math.max(0, Math.min(1, t));
+    for(let i=0;i<kt.length-1;i++){
+      if(t >= kt[i] && t <= kt[i+1]){
+        if(discrete || typeof vals[i] !== 'number') return vals[i];
+        const localT = (t-kt[i]) / ((kt[i+1]-kt[i]) || 1);
+        return vals[i] + (vals[i+1]-vals[i])*localT;
+      }
+    }
+    return vals[vals.length-1];
+  }
+
   // a value that holds vStart, sweeps to vEnd during [t0,t1], then holds —
   // used to sweep the traveling dash smoothly along one line segment,
   // always landing exactly on the node at both ends (never off-path)
+  function sweepPoints(t0, t1, vStart, vEnd){
+    return [[t0, vStart], [t1, vEnd]];
+  }
   function sweepEnvelope(t0, t1, vStart, vEnd){
-    return buildEnvelope([[t0, vStart], [t1, vEnd]]);
+    return buildEnvelope(sweepPoints(t0, t1, vStart, vEnd));
   }
   // a brief bump up to a peak value right at arrival, then back to base —
-  // used for a node's radius when the glow passes through it
-  function bumpEnvelope(arrivalT, bumpWidth, baseVal, peakVal){
+  // used for a node's radius when the glow passes through it. With
+  // arrivalT=0 this instead starts AT the peak and settles to base — used
+  // for the target diamonds' press-down cue.
+  function bumpPoints(arrivalT, bumpWidth, baseVal, peakVal){
     const pts = arrivalT > 0 ? [[0, baseVal], [arrivalT, peakVal]] : [[0, peakVal]];
     pts.push([Math.min(1, arrivalT + bumpWidth), baseVal]);
-    return buildEnvelope(pts);
+    return pts;
+  }
+  function bumpEnvelope(arrivalT, bumpWidth, baseVal, peakVal){
+    return buildEnvelope(bumpPoints(arrivalT, bumpWidth, baseVal, peakVal));
   }
   // RULE: a node only holds its section's color briefly, then reverts to
   // white — not a permanent tint. Discrete (not eased), same shape as the
   // radius bump so color and size settle back together.
-  function litEnvelope(arrivalT, holdWidth, baseColor, litColor){
+  function litPoints(arrivalT, holdWidth, baseColor, litColor){
     const pts = arrivalT > 0 ? [[0, baseColor], [arrivalT, litColor]] : [[0, litColor]];
     pts.push([Math.min(1, arrivalT + holdWidth), baseColor]);
-    return buildEnvelope(pts);
+    return pts;
+  }
+  function litEnvelope(arrivalT, holdWidth, baseColor, litColor){
+    return buildEnvelope(litPoints(arrivalT, holdWidth, baseColor, litColor));
   }
   // RULE: the glow should read as one continuous pass, not stop-start at
   // each node — fades a segment's pulse in slightly BEFORE it starts moving
   // and out slightly AFTER it finishes, so consecutive segments overlap for
   // a brief moment right at the shared node instead of both going dark.
   // peakOpacity keeps the glow translucent rather than solid white.
-  function pulseOpacityEnvelope(t0, t1, crossfade, peakOpacity){
+  function pulseOpacityPoints(t0, t1, crossfade, peakOpacity){
     const preFade = Math.max(0, t0 - crossfade);
     const postFade = Math.min(1, t1 + crossfade);
     const pts = [];
@@ -500,7 +545,10 @@
     pts.push([t0, peakOpacity]);
     pts.push([t1, peakOpacity]);
     pts.push([postFade, 0]);
-    return buildEnvelope(pts);
+    return pts;
+  }
+  function pulseOpacityEnvelope(t0, t1, crossfade, peakOpacity){
+    return buildEnvelope(pulseOpacityPoints(t0, t1, crossfade, peakOpacity));
   }
 
   // positions for one layer in Linear shape: a single node sits dead-center;
@@ -790,7 +838,12 @@
   }
 
   // ====================== RENDER ======================
-  function render(){
+  // frameT (0–1, fraction of one CYCLE), when given, renders a static
+  // "freeze-frame" snapshot of the animation at that instant instead of
+  // live SMIL <animate> tags, and returns the composed markup string rather
+  // than writing it into the visible #stage — used by the video exporter to
+  // build each frame off-DOM without disturbing the live preview.
+  function render(frameT){
     const thickness = 0.4 + parseFloat(document.getElementById('rng-thickness').value)/100 * 2.0;
     const includeBg = document.getElementById('chk-include-bg').checked;
     const opacityVar = parseFloat(document.getElementById('rng-opacityvar').value) / 100;
@@ -864,8 +917,19 @@
         // dash offset stays within the visible [0, -(1-DASH_LEN)] range the
         // whole time, so it's exactly at the start node at t0 and exactly
         // at the end node at t1 — never off-path, never invisible mid-sweep
-        const sweep = sweepEnvelope(t0, t1, 0, -(1-DASH_LEN));
-        const fade = pulseOpacityEnvelope(t0, t1, CROSSFADE, PULSE_OPACITY);
+        const sweepPts = sweepPoints(t0, t1, 0, -(1-DASH_LEN));
+        const fadePts = pulseOpacityPoints(t0, t1, CROSSFADE, PULSE_OPACITY);
+        if(frameT != null){
+          const dashOffset = sampleEnvelopeAtT(sweepPts, frameT);
+          const op = sampleEnvelopeAtT(fadePts, frameT);
+          if(op <= 0.002) continue; // skip invisible pulses to keep frame markup small
+          stageLines[li].forEach(l => {
+            pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`;
+          });
+          continue;
+        }
+        const sweep = buildEnvelope(sweepPts);
+        const fade = buildEnvelope(fadePts);
         stageLines[li].forEach(l => {
           pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
         });
@@ -911,13 +975,26 @@
             nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="${baseFill}" opacity="0.95"/>`;
             return;
           }
-          // bumpEnvelope with arrivalT=0 starts at its "peak" value and
-          // presses down to "base" by bumpWidth — passing full point-list
-          // strings instead of numbers works because buildEnvelope treats
-          // values as opaque, so this animates the whole diamond shape
-          // shrinking from oversized to resting size.
-          const haloPressEnv = bumpEnvelope(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondHaloR), diamondPoints(x,y,diamondHaloR*DIAMOND_PRESS_PEAK));
-          const dotPressEnv = bumpEnvelope(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondDotR), diamondPoints(x,y,diamondDotR*DIAMOND_PRESS_PEAK));
+          // bumpPoints with arrivalT=0 starts at its "peak" value and
+          // presses down to "base" by bumpWidth. Live playback animates the
+          // polygon's "points" attribute directly between full point-list
+          // strings (browsers interpolate list-of-numbers attributes
+          // coordinate-by-coordinate, so this reads as a smooth press).
+          // Video-frame sampling can't reuse that string interpolation —
+          // sampleEnvelopeAtT would just hold one string or the other,
+          // producing a jump-cut — so it samples the underlying NUMERIC
+          // radius instead and builds the points string fresh from that,
+          // keeping the exported motion exactly as smooth as the live one.
+          if(frameT != null){
+            const haloR_t = sampleEnvelopeAtT(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondHaloR, diamondHaloR*DIAMOND_PRESS_PEAK), frameT);
+            const dotR_t = sampleEnvelopeAtT(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondDotR, diamondDotR*DIAMOND_PRESS_PEAK), frameT);
+            const fill_t = permanentColors ? litColor : sampleEnvelopeAtT(litPoints(0, COLOR_HOLD, '#ffffff', litColor), frameT, true);
+            nodesMk += `<polygon points="${diamondPoints(x,y,haloR_t)}" fill="${fill_t}" opacity="0.14" filter="url(#fw-glow)"/>`;
+            nodesMk += `<polygon points="${diamondPoints(x,y,dotR_t)}" fill="${fill_t}" opacity="0.95"/>`;
+            return;
+          }
+          const haloPressEnv = buildEnvelope(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondHaloR), diamondPoints(x,y,diamondHaloR*DIAMOND_PRESS_PEAK)));
+          const dotPressEnv = buildEnvelope(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondDotR), diamondPoints(x,y,diamondDotR*DIAMOND_PRESS_PEAK)));
           const haloPressAnim = `<animate attributeName="points" keyTimes="${haloPressEnv.keyTimes}" values="${haloPressEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/>`;
           const dotPressAnim = `<animate attributeName="points" keyTimes="${dotPressEnv.keyTimes}" values="${dotPressEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/>`;
           if(permanentColors){
@@ -937,8 +1014,18 @@
           return;
         }
         const af = arrivalFrac(li);
-        const haloEnv = bumpEnvelope(af, 0.32, haloR, haloR*1.9);
-        const dotEnv = bumpEnvelope(af, 0.32, dotR, dotR*1.65);
+        const haloBumpPts = bumpPoints(af, 0.32, haloR, haloR*1.9);
+        const dotBumpPts = bumpPoints(af, 0.32, dotR, dotR*1.65);
+        if(frameT != null){
+          const haloR_t = sampleEnvelopeAtT(haloBumpPts, frameT);
+          const dotR_t = sampleEnvelopeAtT(dotBumpPts, frameT);
+          const fill_t = permanentColors ? litColor : sampleEnvelopeAtT(litPoints(af, COLOR_HOLD, '#ffffff', litColor), frameT, true);
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR_t.toFixed(2)}" fill="${fill_t}" opacity="0.14" filter="url(#fw-glow)"/>`;
+          nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR_t.toFixed(2)}" fill="${fill_t}" opacity="0.95"/>`;
+          return;
+        }
+        const haloEnv = buildEnvelope(haloBumpPts);
+        const dotEnv = buildEnvelope(dotBumpPts);
         if(permanentColors){
           nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="${litColor}" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="r" keyTimes="${haloEnv.keyTimes}" values="${haloEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
           nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="${litColor}" opacity="0.95"><animate attributeName="r" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
@@ -961,10 +1048,18 @@
       });
     });
 
-    const bg = includeBg ? `<rect x="0" y="0" width="${W}" height="${H}" fill="#000000"/>` : '';
+    // RULE: video export always forces a black background regardless of
+    // "Include black background in export" — that toggle exists for SVG
+    // export, where transparency is meaningful; a transparent video frame
+    // isn't (most video codecs/players don't handle alpha), so a missing
+    // background would just look wrong rather than "transparent".
+    const bg = (includeBg || frameT != null) ? `<rect x="0" y="0" width="${W}" height="${H}" fill="#000000"/>` : '';
+    const svgInner = `<defs>${defs}</defs>${bg}<g>${paths}</g><g>${pulseMk}</g><g>${nodesMk}</g>`;
+
+    if(frameT != null) return svgInner;
 
     stage.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    stage.innerHTML = `<defs>${defs}</defs>${bg}<g>${paths}</g><g>${pulseMk}</g><g>${nodesMk}</g>`;
+    stage.innerHTML = svgInner;
   }
 
   function fullRegenerate(){
@@ -1110,6 +1205,122 @@
     URL.revokeObjectURL(url);
     progress.textContent = `Done — ${n} files exported.`;
     setTimeout(()=>{ progress.textContent=''; }, 4000);
+  });
+
+  // ====================== VIDEO EXPORT ======================
+  // Records the current composition's animation loop to a .webm file.
+  // Rather than trying to capture the live SMIL-driven SVG (there's no
+  // reliable cross-browser way to read a running SMIL animation's current
+  // value), each frame is rendered independently via render(frameT) — a
+  // static snapshot of the exact same animation math at that instant — then
+  // rasterized to a canvas. canvas.captureStream()+MediaRecorder samples
+  // that canvas in real time, so pacing each frame draw roughly 1/fps apart
+  // is what makes the recorded clip's wall-clock length come out correct.
+  const VIDEO_FPS = 30;
+  const VIDEO_MAX_DIM = 1080; // cap recording resolution for file size/perf; preview stays full-res
+
+  function svgFrameToImage(svgMarkup){
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgMarkup);
+    });
+  }
+
+  document.getElementById('btn-export-video').addEventListener('click', async () => {
+    const progress = document.getElementById('progress');
+    if(!document.getElementById('chk-animate').checked){
+      progress.textContent = 'Turn on "Animate glow" first — a video needs something to animate.';
+      setTimeout(()=>{ progress.textContent=''; }, 4000);
+      return;
+    }
+    if(typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream){
+      progress.textContent = 'Video export needs a browser with MediaRecorder + canvas.captureStream support.';
+      setTimeout(()=>{ progress.textContent=''; }, 4000);
+      return;
+    }
+
+    const btn = document.getElementById('btn-export-video');
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+
+    try{
+      const cycles = Math.max(1, Math.min(6, parseInt(document.getElementById('num-video-cycles').value) || 1));
+      const totalSeconds = CYCLE * cycles;
+      const scale = Math.min(1, VIDEO_MAX_DIM / Math.max(W, H));
+      const outW = Math.max(1, Math.round(W*scale)), outH = Math.max(1, Math.round(H*scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = outW; canvas.height = outH;
+      const ctx = canvas.getContext('2d');
+
+      const stream = canvas.captureStream(VIDEO_FPS);
+      const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+      const mimeType = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+      const chunks = [];
+      recorder.ondataavailable = (e) => { if(e.data && e.data.size) chunks.push(e.data); };
+      const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+
+      // RULE: drive the loop off a real-time budget (totalMs), not a fixed
+      // frame count. A dense diagram can take longer than 1/30s to render
+      // and rasterize a single frame — if each draw simply waited its own
+      // 1/fps slot regardless, the recording session's WALL-CLOCK length
+      // (which is what actually determines the exported clip's duration,
+      // since MediaRecorder just records however long it runs) would
+      // balloon past the intended length, and the clip would play back in
+      // slow motion. Instead: stop as soon as `totalMs` of real time have
+      // elapsed no matter how many frames that allowed, so the exported
+      // clip's duration and playback speed are always correct — a heavy
+      // diagram trades frame rate for that, not correctness.
+      recorder.start();
+      const totalMs = totalSeconds * 1000;
+      const cycleMs = CYCLE * 1000;
+      const frameInterval = 1000 / VIDEO_FPS;
+      const startTime = performance.now();
+      let nextDrawTime = startTime;
+      let framesDrawn = 0;
+      while(true){
+        const now = performance.now();
+        const elapsed = now - startTime;
+        if(elapsed >= totalMs) break;
+        if(now < nextDrawTime){
+          await new Promise(r => setTimeout(r, Math.min(nextDrawTime - now, 50)));
+          continue;
+        }
+        const frameT = (elapsed % cycleMs) / cycleMs;
+        const svgInner = render(frameT);
+        const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${svgInner}</svg>`;
+        const img = await svgFrameToImage(svgMarkup);
+        ctx.clearRect(0, 0, outW, outH);
+        ctx.drawImage(img, 0, 0, outW, outH);
+        framesDrawn++;
+        nextDrawTime += frameInterval;
+        progress.textContent = `Recording video: ${(elapsed/1000).toFixed(1)}s / ${totalSeconds.toFixed(1)}s…`;
+        await new Promise(r => setTimeout(r, 0)); // always yield so the browser's capture pipeline can run
+      }
+      recorder.stop();
+      await stopped;
+
+      const blob = new Blob(chunks, { type: mimeType });
+      const ext = mimeType.includes('webm') ? 'webm' : 'mp4';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `flow_weave_${variationCount}.${ext}`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      const avgFps = (framesDrawn / totalSeconds).toFixed(1);
+      progress.textContent = `Done — video exported (${cycles} loop${cycles>1?'s':''}, ~${avgFps}fps).`;
+      setTimeout(()=>{ progress.textContent=''; }, 4000);
+    } catch(err){
+      progress.textContent = 'Video export failed: ' + (err && err.message ? err.message : err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+      render(); // restore the live animated preview after off-DOM frame rendering
+    }
   });
 
   document.getElementById('btn-comp-simple').addEventListener('click', () => setCompositionMode('simple'));
