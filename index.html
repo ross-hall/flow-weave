@@ -1325,6 +1325,7 @@
     const btn = document.getElementById('btn-export-video');
     const originalLabel = btn.textContent;
     btn.disabled = true;
+    let canvas;
 
     try{
       const cycles = Math.max(1, Math.min(6, parseInt(document.getElementById('num-video-cycles').value) || 1));
@@ -1332,11 +1333,25 @@
       const scale = Math.min(1, VIDEO_MAX_DIM / Math.max(W, H));
       const outW = Math.max(1, Math.round(W*scale)), outH = Math.max(1, Math.round(H*scale));
 
-      const canvas = document.createElement('canvas');
+      canvas = document.createElement('canvas');
       canvas.width = outW; canvas.height = outH;
+      // RULE: some browsers only actually paint (and therefore only ever
+      // feed real frames into captureStream) a canvas that's part of the
+      // rendered document — an off-DOM canvas can record as an essentially
+      // empty file. Keep it in the layout but pushed off-screen (not
+      // display:none/visibility:hidden, which some browsers also skip
+      // painting for) so it's invisible without breaking capture.
+      canvas.style.cssText = 'position:fixed;left:-99999px;top:0;';
+      document.body.appendChild(canvas);
       const ctx = canvas.getContext('2d');
 
-      const stream = canvas.captureStream(VIDEO_FPS);
+      // Manual capture mode (frameRequestRate 0): a frame is only pushed to
+      // the stream when we explicitly call track.requestFrame(), right
+      // after each drawImage below — rather than trusting the browser to
+      // sample the canvas on its own fixed-rate timer, which is what was
+      // producing near-empty (~100 byte) recordings.
+      const stream = canvas.captureStream(0);
+      const [videoTrack] = stream.getVideoTracks();
       const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
       const mimeType = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
       const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
@@ -1376,6 +1391,7 @@
         const img = await svgFrameToImage(svgMarkup);
         ctx.clearRect(0, 0, outW, outH);
         ctx.drawImage(img, 0, 0, outW, outH);
+        videoTrack.requestFrame();
         framesDrawn++;
         nextDrawTime += frameInterval;
         progress.textContent = `Recording video: ${(elapsed/1000).toFixed(1)}s / ${totalSeconds.toFixed(1)}s…`;
@@ -1398,6 +1414,7 @@
     } catch(err){
       progress.textContent = 'Video export failed: ' + (err && err.message ? err.message : err);
     } finally {
+      if(canvas && canvas.parentNode) canvas.parentNode.removeChild(canvas);
       btn.disabled = false;
       btn.textContent = originalLabel;
       render(); // restore the live animated preview after off-DOM frame rendering
