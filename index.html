@@ -879,6 +879,13 @@
     // noticeably smaller — scale the diamond's radius up to compensate and
     // read as clearly bigger than the circles, not just equal.
     const DIAMOND_SCALE = 1.4;
+    // RULE: targets are the start of the flow, not a stop the glow passes
+    // through, so their size cue reads differently from downstream nodes'
+    // bump-up pulse. Each cycle they begin oversized (DIAMOND_PRESS_PEAK×)
+    // and visibly press down to resting size by DIAMOND_PRESS_WIDTH — a
+    // "press that kicks off the cascade" rather than a reaction to one.
+    const DIAMOND_PRESS_PEAK = 1.8;
+    const DIAMOND_PRESS_WIDTH = 0.35;
 
     layers.forEach((layer, li) => {
       const litColor = layerColors[li];
@@ -889,15 +896,29 @@
         const x = pt.x, y = pt.y;
         // RULE: the very first layer's nodes render as diamonds, not circles.
         if(li === 0){
-          if(!animateOn || permanentColors){
-            const glowAttr = animateOn ? ' filter="url(#fw-glow)"' : '';
-            nodesMk += `<polygon points="${diamondPoints(x,y,diamondHaloR)}" fill="${baseFill}" opacity="0.14"${glowAttr}/>`;
+          if(!animateOn){
+            nodesMk += `<polygon points="${diamondPoints(x,y,diamondHaloR)}" fill="${baseFill}" opacity="0.14"/>`;
             nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="${baseFill}" opacity="0.95"/>`;
             return;
           }
+          // bumpEnvelope with arrivalT=0 starts at its "peak" value and
+          // presses down to "base" by bumpWidth — passing full point-list
+          // strings instead of numbers works because buildEnvelope treats
+          // values as opaque, so this animates the whole diamond shape
+          // shrinking from oversized to resting size.
+          const haloPressEnv = bumpEnvelope(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondHaloR), diamondPoints(x,y,diamondHaloR*DIAMOND_PRESS_PEAK));
+          const dotPressEnv = bumpEnvelope(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondDotR), diamondPoints(x,y,diamondDotR*DIAMOND_PRESS_PEAK));
+          const haloPressAnim = `<animate attributeName="points" keyTimes="${haloPressEnv.keyTimes}" values="${haloPressEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/>`;
+          const dotPressAnim = `<animate attributeName="points" keyTimes="${dotPressEnv.keyTimes}" values="${dotPressEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/>`;
+          if(permanentColors){
+            nodesMk += `<polygon points="${diamondPoints(x,y,diamondHaloR)}" fill="${litColor}" opacity="0.14" filter="url(#fw-glow)">${haloPressAnim}</polygon>`;
+            nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="${litColor}" opacity="0.95">${dotPressAnim}</polygon>`;
+            return;
+          }
           const colorEnv = litEnvelope(0, COLOR_HOLD, '#ffffff', litColor);
-          nodesMk += `<polygon points="${diamondPoints(x,y,diamondHaloR)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
-          nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="#ffffff" opacity="0.95"><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></polygon>`;
+          const colorAnim = `<animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/>`;
+          nodesMk += `<polygon points="${diamondPoints(x,y,diamondHaloR)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)">${haloPressAnim}${colorAnim}</polygon>`;
+          nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="#ffffff" opacity="0.95">${dotPressAnim}${colorAnim}</polygon>`;
           return;
         }
         if(!animateOn){
