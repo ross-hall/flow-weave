@@ -309,6 +309,18 @@
     simple: 2,
     complex: 5
   };
+  // Max edges any single node may receive FROM the previous layer — capped
+  // much tighter than the fan-out above. Without this, Complex's high
+  // fan-out plus many targets meant a handful of downstream nodes (often
+  // right at the final "DEG" layer) absorbed nearly every pathway, reading
+  // as if every target funneled into the same endpoint. Some convergence is
+  // still fine (a lower cap than 1 would look identical to Simple), but
+  // capping in-degree well below the fan-out keeps each pathway legible as
+  // its own thread even through a dense mesh.
+  const MAX_IN_DEGREE = {
+    simple: 2,
+    complex: 3
+  };
 
   // Node-layer composition defaults — a single target (source) node fanning
   // out over 5 layers, peaking at 4 connected nodes per layer. All three are
@@ -760,6 +772,7 @@
   function buildStageLines(fromPts, toPts){
     const F = fromPts.length, T = toPts.length;
     const maxDegree = MAX_DEGREE[compositionMode];
+    const maxInDegree = MAX_IN_DEGREE[compositionMode];
     const fromDeg = new Array(F).fill(0);
     const toDeg = new Array(T).fill(0);
     const seen = new Set();
@@ -767,11 +780,22 @@
 
     function tryConnect(fi, ti){
       const key = fi + '-' + ti;
-      if(seen.has(key) || fromDeg[fi] >= maxDegree || toDeg[ti] >= maxDegree) return false;
+      if(seen.has(key) || fromDeg[fi] >= maxDegree || toDeg[ti] >= maxInDegree) return false;
       seen.add(key);
       edges.push([fi, ti]);
       fromDeg[fi]++; toDeg[ti]++;
       return true;
+    }
+
+    // Used only once every node is already at its degree cap and a
+    // connection still needs to be forced (so nothing ends up orphaned).
+    // Picks whichever partner currently has the FEWEST edges rather than a
+    // random one, so any unavoidable overflow past the cap spreads out
+    // instead of piling onto a single node — which would recreate exactly
+    // the "everything converges on one point" look the caps exist to avoid.
+    function leastLoadedPartner(size, deg, isTaken){
+      const order = shuffleArr(Array.from({length:size}, (_,i)=>i)).sort((a,b) => deg[a]-deg[b]);
+      return order.find(idx => !isTaken(idx)) ?? order[0];
     }
 
     // each "from" node picks between 1 and maxDegree partners — Complex
@@ -793,27 +817,23 @@
     shuffleArr(Array.from({length:T}, (_,i)=>i)).forEach(ti => {
       if(toDeg[ti] > 0) return;
       const underCap = shuffleArr(Array.from({length:F}, (_,i)=>i)).filter(fi => fromDeg[fi] < maxDegree);
-      if(underCap.length){ tryConnect(underCap[0], ti); }
-      else {
-        // structurally forced (e.g. a single first-layer node reaching
-        // several next-layer nodes) — connect anyway, just past the usual
-        // cap
-        const fi = Math.floor(Math.random()*F);
-        const key = fi+'-'+ti;
-        if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
-      }
+      if(underCap.length){ tryConnect(underCap[0], ti); return; }
+      // structurally forced (e.g. a single first-layer node reaching
+      // several next-layer nodes) — connect anyway, just past the usual
+      // cap, onto whichever "from" node has spare capacity least often used.
+      const fi = leastLoadedPartner(F, fromDeg, i => seen.has(i+'-'+ti));
+      const key = fi+'-'+ti;
+      if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
     });
 
     // guarantee every "from" node has at least one connection
     shuffleArr(Array.from({length:F}, (_,i)=>i)).forEach(fi => {
       if(fromDeg[fi] > 0) return;
-      const underCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < maxDegree);
-      if(underCap.length){ tryConnect(fi, underCap[0]); }
-      else {
-        const ti = Math.floor(Math.random()*T);
-        const key = fi+'-'+ti;
-        if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
-      }
+      const underCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < maxInDegree);
+      if(underCap.length){ tryConnect(fi, underCap[0]); return; }
+      const ti = leastLoadedPartner(T, toDeg, i => seen.has(fi+'-'+i));
+      const key = fi+'-'+ti;
+      if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
     });
 
     // RULE: every connection gets its own random bow (a perpendicular
