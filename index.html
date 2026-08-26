@@ -388,7 +388,10 @@
   const STAGE_DUR = 1.0, STAGE_PAUSE = 0.6;
   let NUM_STAGES = LAYER_COUNTS.length - 1;
   let CYCLE = NUM_STAGES * STAGE_DUR + STAGE_PAUSE;
-  const arrivalFrac = (layerIndex) => (layerIndex * STAGE_DUR) / CYCLE;
+  // RULE: targets don't all fire in lockstep — each gets its own small
+  // random head start (as a fraction of one stage's travel time), so their
+  // pulses visibly depart at different moments instead of simultaneously.
+  const TARGET_PHASE_SPREAD = 0.6; // up to 60% of one stage's duration
 
   // ====================== STATE ======================
   let compositionMode = 'simple'; // 'simple' | 'complex' — density/connectivity
@@ -403,6 +406,15 @@
   let unattached = [];   // array of arrays of y-positions — visible, unconnected
   let lines = [];        // {x0,y0,x1,y1,bow} — flattened, one per connection between adjacent layers
   let stageLines = [];   // same connections grouped per stage — [stage][edge], used to keep glow pulses aligned with the actual drawn lines
+  // nodeFireTimes[li][j] — the moment (0–1 fraction of CYCLE) node j in
+  // layer li actually receives the glow and fires onward. Layer 0 gets each
+  // target's own random head start (see TARGET_PHASE_SPREAD); every layer
+  // after that is derived by propagating those times forward — see
+  // computeNodeFireTimes — so a downstream node's timing always reflects
+  // whichever upstream path actually reaches it first, and an edge's own
+  // travel window is always [source's fire time, +one stage duration],
+  // which is self-consistent no matter how staggered the source was.
+  let nodeFireTimes = [];
   let currentPalette = 'aurora';
   let variationCount = 0;
 
@@ -710,8 +722,32 @@
       stageLines.push(buildStageLines(layers[li], layers[li+1]));
     }
     lines = stageLines.flat();
+    nodeFireTimes = computeNodeFireTimes();
 
     updateCompositionHint();
+  }
+
+  // Propagates each target's own staggered start (TARGET_PHASE_SPREAD)
+  // forward through the graph, so every node's fire time reflects when the
+  // glow actually reaches it via whichever upstream path gets there first —
+  // see the nodeFireTimes declaration above for why this (rather than a
+  // flat per-stage time) is what keeps every edge's travel window valid.
+  function computeNodeFireTimes(){
+    const stageFrac = STAGE_DUR / CYCLE;
+    const times = [layers[0].map(() => Math.random() * TARGET_PHASE_SPREAD * stageFrac)];
+    for(let li=1; li<layers.length; li++){
+      const layerTimes = new Array(layers[li].length).fill(Infinity);
+      stageLines[li-1].forEach(l => {
+        const candidate = times[li-1][l.srcIndex] + stageFrac;
+        if(candidate < layerTimes[l.dstIndex]) layerTimes[l.dstIndex] = candidate;
+      });
+      // every node is guaranteed at least one incoming edge (see
+      // buildStageLines), so Infinity should never survive — but fall back
+      // to the plain per-layer baseline defensively rather than propagate
+      // a broken animation time.
+      times.push(layerTimes.map((t, j) => Number.isFinite(t) ? t : li*stageFrac));
+    }
+    return times;
   }
 
   // sparse bipartite connections between one layer's points and the next's:
@@ -793,10 +829,15 @@
       }
       return compositionMode === 'complex' ? (Math.random()-0.5)*260 : 0;
     }
+    // srcIndex/dstIndex (the endpoints' positions within fromPts/toPts) are
+    // kept so render() can look up each node's own fire time — see
+    // computeNodeFireTimes — needed to give each target its own staggered
+    // start instead of every pulse departing at the same instant.
     return edges.map(([fi,ti]) => ({
       x0: fromPts[fi].x, y0: fromPts[fi].y,
       x1: toPts[ti].x, y1: toPts[ti].y,
-      bow: randomBow()
+      bow: randomBow(),
+      srcIndex: fi, dstIndex: ti
     }));
   }
 
@@ -912,25 +953,28 @@
       const DASH_LEN = 0.09;               // fraction of the segment's own length
       const CROSSFADE = 0.045;              // fraction of the full cycle, for the handoff overlap
       const PULSE_OPACITY = 0.5;            // translucent, not solid white
+      const stageFrac = STAGE_DUR / CYCLE;
       for(let li=0; li<stageLines.length; li++){
-        const t0 = arrivalFrac(li), t1 = arrivalFrac(li+1);
-        // dash offset stays within the visible [0, -(1-DASH_LEN)] range the
-        // whole time, so it's exactly at the start node at t0 and exactly
-        // at the end node at t1 — never off-path, never invisible mid-sweep
-        const sweepPts = sweepPoints(t0, t1, 0, -(1-DASH_LEN));
-        const fadePts = pulseOpacityPoints(t0, t1, CROSSFADE, PULSE_OPACITY);
-        if(frameT != null){
-          const dashOffset = sampleEnvelopeAtT(sweepPts, frameT);
-          const op = sampleEnvelopeAtT(fadePts, frameT);
-          if(op <= 0.002) continue; // skip invisible pulses to keep frame markup small
-          stageLines[li].forEach(l => {
-            pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`;
-          });
-          continue;
-        }
-        const sweep = buildEnvelope(sweepPts);
-        const fade = buildEnvelope(fadePts);
         stageLines[li].forEach(l => {
+          // Each edge's own travel window starts exactly when its specific
+          // source node fired (nodeFireTimes[li][srcIndex] — staggered per
+          // target, propagated downstream) and lasts one stage duration.
+          // dash offset stays within the visible [0, -(1-DASH_LEN)] range
+          // the whole time, so it's exactly at the start node at t0 and
+          // exactly at the end node at t1 — never off-path, never invisible
+          // mid-sweep.
+          const t0 = nodeFireTimes[li][l.srcIndex], t1 = t0 + stageFrac;
+          const sweepPts = sweepPoints(t0, t1, 0, -(1-DASH_LEN));
+          const fadePts = pulseOpacityPoints(t0, t1, CROSSFADE, PULSE_OPACITY);
+          if(frameT != null){
+            const dashOffset = sampleEnvelopeAtT(sweepPts, frameT);
+            const op = sampleEnvelopeAtT(fadePts, frameT);
+            if(op <= 0.002) return; // skip invisible pulses to keep frame markup small
+            pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`;
+            return;
+          }
+          const sweep = buildEnvelope(sweepPts);
+          const fade = buildEnvelope(fadePts);
           pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
         });
       }
@@ -966,17 +1010,26 @@
       const haloR = 9*sizeScale, dotR = 4*sizeScale;
       const diamondHaloR = haloR*DIAMOND_SCALE, diamondDotR = dotR*DIAMOND_SCALE;
       const baseFill = permanentColors ? litColor : '#ffffff';
-      layer.forEach(pt => {
+      layer.forEach((pt, ptIndex) => {
         const x = pt.x, y = pt.y;
-        // RULE: the very first layer's nodes render as diamonds, not circles.
+        // RULE: the very first layer's nodes render as diamonds, not
+        // circles — and each target gets its own fire time (see
+        // nodeFireTimes/TARGET_PHASE_SPREAD) instead of firing at t=0 in
+        // lockstep, so multiple targets visibly press/depart at different
+        // moments rather than simultaneously.
         if(li === 0){
+          const targetFireT = nodeFireTimes[0][ptIndex];
           if(!animateOn){
             nodesMk += `<polygon points="${diamondPoints(x,y,diamondHaloR)}" fill="${baseFill}" opacity="0.14"/>`;
             nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="${baseFill}" opacity="0.95"/>`;
             return;
           }
           // bumpPoints with arrivalT=0 starts at its "peak" value and
-          // presses down to "base" by bumpWidth. Live playback animates the
+          // presses down to "base" by bumpWidth; with arrivalT>0 (a target
+          // whose fire time got staggered later) it instead ramps up FROM
+          // base and peaks (presses) exactly at that fire time, then
+          // settles — same shape, just centered on this target's own
+          // moment instead of always t=0. Live playback animates the
           // polygon's "points" attribute directly between full point-list
           // strings (browsers interpolate list-of-numbers attributes
           // coordinate-by-coordinate, so this reads as a smooth press).
@@ -986,15 +1039,15 @@
           // radius instead and builds the points string fresh from that,
           // keeping the exported motion exactly as smooth as the live one.
           if(frameT != null){
-            const haloR_t = sampleEnvelopeAtT(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondHaloR, diamondHaloR*DIAMOND_PRESS_PEAK), frameT);
-            const dotR_t = sampleEnvelopeAtT(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondDotR, diamondDotR*DIAMOND_PRESS_PEAK), frameT);
-            const fill_t = permanentColors ? litColor : sampleEnvelopeAtT(litPoints(0, COLOR_HOLD, '#ffffff', litColor), frameT, true);
+            const haloR_t = sampleEnvelopeAtT(bumpPoints(targetFireT, DIAMOND_PRESS_WIDTH, diamondHaloR, diamondHaloR*DIAMOND_PRESS_PEAK), frameT);
+            const dotR_t = sampleEnvelopeAtT(bumpPoints(targetFireT, DIAMOND_PRESS_WIDTH, diamondDotR, diamondDotR*DIAMOND_PRESS_PEAK), frameT);
+            const fill_t = permanentColors ? litColor : sampleEnvelopeAtT(litPoints(targetFireT, COLOR_HOLD, '#ffffff', litColor), frameT, true);
             nodesMk += `<polygon points="${diamondPoints(x,y,haloR_t)}" fill="${fill_t}" opacity="0.14" filter="url(#fw-glow)"/>`;
             nodesMk += `<polygon points="${diamondPoints(x,y,dotR_t)}" fill="${fill_t}" opacity="0.95"/>`;
             return;
           }
-          const haloPressEnv = buildEnvelope(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondHaloR), diamondPoints(x,y,diamondHaloR*DIAMOND_PRESS_PEAK)));
-          const dotPressEnv = buildEnvelope(bumpPoints(0, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondDotR), diamondPoints(x,y,diamondDotR*DIAMOND_PRESS_PEAK)));
+          const haloPressEnv = buildEnvelope(bumpPoints(targetFireT, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondHaloR), diamondPoints(x,y,diamondHaloR*DIAMOND_PRESS_PEAK)));
+          const dotPressEnv = buildEnvelope(bumpPoints(targetFireT, DIAMOND_PRESS_WIDTH, diamondPoints(x,y,diamondDotR), diamondPoints(x,y,diamondDotR*DIAMOND_PRESS_PEAK)));
           const haloPressAnim = `<animate attributeName="points" keyTimes="${haloPressEnv.keyTimes}" values="${haloPressEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/>`;
           const dotPressAnim = `<animate attributeName="points" keyTimes="${dotPressEnv.keyTimes}" values="${dotPressEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/>`;
           if(permanentColors){
@@ -1002,7 +1055,7 @@
             nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="${litColor}" opacity="0.95">${dotPressAnim}</polygon>`;
             return;
           }
-          const colorEnv = litEnvelope(0, COLOR_HOLD, '#ffffff', litColor);
+          const colorEnv = litEnvelope(targetFireT, COLOR_HOLD, '#ffffff', litColor);
           const colorAnim = `<animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/>`;
           nodesMk += `<polygon points="${diamondPoints(x,y,diamondHaloR)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)">${haloPressAnim}${colorAnim}</polygon>`;
           nodesMk += `<polygon points="${diamondPoints(x,y,diamondDotR)}" fill="#ffffff" opacity="0.95">${dotPressAnim}${colorAnim}</polygon>`;
@@ -1013,7 +1066,7 @@
           nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="${baseFill}" opacity="0.95"/>`;
           return;
         }
-        const af = arrivalFrac(li);
+        const af = nodeFireTimes[li][ptIndex];
         const haloBumpPts = bumpPoints(af, 0.32, haloR, haloR*1.9);
         const dotBumpPts = bumpPoints(af, 0.32, dotR, dotR*1.65);
         if(frameT != null){
