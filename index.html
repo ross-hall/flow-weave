@@ -1298,7 +1298,22 @@
   // that canvas in real time, so pacing each frame draw roughly 1/fps apart
   // is what makes the recorded clip's wall-clock length come out correct.
   const VIDEO_FPS = 30;
-  const VIDEO_MAX_DIM = 1080; // cap recording resolution for file size/perf; preview stays full-res
+  // RULE: raising this cap seems like the obvious way to sharpen a blurry
+  // export, but was tested up to 1920 and measurably backfired — decoding
+  // and rasterizing every frame's SVG (glow filters included) costs roughly
+  // one extra unit of work per extra pixel, and once that per-frame cost
+  // gets big enough the real-time software video encoder can't keep up and
+  // starts dropping frames outright — which doesn't make the video blurrier,
+  // it silently TRUNCATES it to a fraction of its intended length. 1080
+  // is the highest cap that held up across both light and dense diagrams in
+  // testing; the resolution ceiling for this pipeline is a real-time
+  // encoding budget, not a file-size choice.
+  const VIDEO_MAX_DIM = 1080;
+  // Modest bump over the original flat 8Mbps, which looked visibly blocky —
+  // kept well short of the ceiling that started causing the same real-time
+  // encoder backpressure/truncation problem the resolution cap above is
+  // guarding against.
+  const VIDEO_BITRATE = 12_000_000;
 
   function svgFrameToImage(svgMarkup){
     return new Promise((resolve, reject) => {
@@ -1344,17 +1359,25 @@
       canvas.style.cssText = 'position:fixed;left:-99999px;top:0;';
       document.body.appendChild(canvas);
       const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
 
-      // Manual capture mode (frameRequestRate 0): a frame is only pushed to
-      // the stream when we explicitly call track.requestFrame(), right
-      // after each drawImage below — rather than trusting the browser to
-      // sample the canvas on its own fixed-rate timer, which is what was
-      // producing near-empty (~100 byte) recordings.
-      const stream = canvas.captureStream(0);
+      // Automatic-rate capture (not frameRequestRate 0/manual-only): under
+      // real-time encoder backpressure — a heavy diagram at this resolution
+      // can produce frames faster than the encoder can keep up with — a
+      // fully-manual stream simply drops the frames it can't keep up with,
+      // which was truncating the exported clip to a fraction of its
+      // intended length. The automatic timer instead keeps re-presenting
+      // the last drawn frame to fill any gap, so the recording's duration
+      // stays correct even when the frame RATE has to drop. Still call
+      // track.requestFrame() right after each drawImage (below) so a fresh
+      // frame reaches the recorder as promptly as possible on top of that
+      // safety net, instead of waiting on the timer's own next tick.
+      const stream = canvas.captureStream(VIDEO_FPS);
       const [videoTrack] = stream.getVideoTracks();
       const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
       const mimeType = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: VIDEO_BITRATE });
       const chunks = [];
       recorder.ondataavailable = (e) => { if(e.data && e.data.size) chunks.push(e.data); };
       const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
