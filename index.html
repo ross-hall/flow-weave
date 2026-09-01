@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Flow Weave</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/webm-muxer@5.1.4/build/webm-muxer.js"></script>
 <style>
   :root{
     --bg-panel:#0e0f13;
@@ -215,6 +216,18 @@
       <label class="field" style="margin-top:16px;">Video length (cycles)</label>
       <input type="number" id="num-video-cycles" min="1" max="6" value="1">
       <button class="btn-secondary" id="btn-export-video" style="margin-top:10px;">Export video (.webm)</button>
+
+      <label class="checkbox-row" style="margin-top:10px;">
+        <input type="checkbox" id="chk-experimental-video">
+        Experimental: sharper export (WebCodecs)
+      </label>
+      <div class="hint" style="margin-top:4px; padding-top:0; border-top:none;">
+        Full native resolution instead of a 1080px cap — but relies on your
+        browser's own video encoder, which can be slow or hang on a dense
+        diagram or a long clip. Try it; if it's not finishing, the export
+        button turns into <b>Cancel export</b> — click it to stop safely,
+        then uncheck this and use the standard export instead.
+      </div>
 
       <div class="progress-line" id="progress"></div>
     </div>
@@ -1350,31 +1363,43 @@
   });
 
   // ====================== VIDEO EXPORT ======================
-  // Records the current composition's animation loop to a .webm file.
+  // Records the current composition's animation loop to a video file.
   // Rather than trying to capture the live SMIL-driven SVG (there's no
   // reliable cross-browser way to read a running SMIL animation's current
   // value), each frame is rendered independently via render(frameT) — a
   // static snapshot of the exact same animation math at that instant — then
-  // rasterized to a canvas. canvas.captureStream()+MediaRecorder samples
-  // that canvas in real time, so pacing each frame draw roughly 1/fps apart
-  // is what makes the recorded clip's wall-clock length come out correct.
+  // rasterized to a canvas.
+  //
+  // Two capture strategies:
+  //   1. Standard (default) — canvas.captureStream()+MediaRecorder, which
+  //      is real-time-bound: MediaRecorder has no notion of "this frame
+  //      belongs at t=X", it just records however long it's running. A
+  //      dense diagram can take longer than 1/fps to render+rasterize a
+  //      frame, so the loop below paces itself off a real-time budget
+  //      rather than a fixed frame count — otherwise the recording session
+  //      would run long and the clip would play back in slow motion.
+  //      Resolution/bitrate stay modest here because pushing them further
+  //      risks a DIFFERENT failure mode: under real-time encoder
+  //      backpressure, frames get dropped outright, silently TRUNCATING the
+  //      clip instead of just looking worse.
+  //   2. Experimental (opt-in) — WebCodecs (VideoEncoder + webm-muxer).
+  //      Each frame is handed to the encoder with an explicit timestamp
+  //      computed from its own frame index, not wall-clock time, so the
+  //      muxed file's duration is correct by construction regardless of how
+  //      long encoding actually takes — which is what allows exporting at
+  //      full native resolution instead of the 1080px cap. The tradeoff:
+  //      this relies on the browser's own WebCodecs video encoder, and
+  //      testing found at least one real environment where that encoder
+  //      gets progressively — sometimes drastically — slower as the frame
+  //      count climbs, for reasons outside this app's control. That's why
+  //      it's opt-in with a warning rather than the default, and why the
+  //      export button turns into a Cancel button while it runs.
   const VIDEO_FPS = 30;
-  // RULE: raising this cap seems like the obvious way to sharpen a blurry
-  // export, but was tested up to 1920 and measurably backfired — decoding
-  // and rasterizing every frame's SVG (glow filters included) costs roughly
-  // one extra unit of work per extra pixel, and once that per-frame cost
-  // gets big enough the real-time software video encoder can't keep up and
-  // starts dropping frames outright — which doesn't make the video blurrier,
-  // it silently TRUNCATES it to a fraction of its intended length. 1080
-  // is the highest cap that held up across both light and dense diagrams in
-  // testing; the resolution ceiling for this pipeline is a real-time
-  // encoding budget, not a file-size choice.
-  const VIDEO_MAX_DIM = 1080;
-  // Modest bump over the original flat 8Mbps, which looked visibly blocky —
-  // kept well short of the ceiling that started causing the same real-time
-  // encoder backpressure/truncation problem the resolution cap above is
-  // guarding against.
-  const VIDEO_BITRATE = 12_000_000;
+  const VIDEO_MAX_DIM = 1080; // standard path — see capture strategy 1 above
+  const VIDEO_BITRATE = 12_000_000; // standard path
+  const VIDEO_MAX_DIM_EXPERIMENTAL = 1920; // experimental path — see capture strategy 2 above
+  const VIDEO_BITS_PER_PIXEL_PER_FRAME = 0.25;
+  const VIDEO_MIN_BITRATE_EXPERIMENTAL = 10_000_000, VIDEO_MAX_BITRATE_EXPERIMENTAL = 40_000_000;
 
   function svgFrameToImage(svgMarkup){
     return new Promise((resolve, reject) => {
@@ -1385,120 +1410,219 @@
     });
   }
 
+  function buildFrameSvgMarkup(frameT){
+    const svgInner = render(frameT);
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${svgInner}</svg>`;
+  }
+
+  class VideoExportCancelled extends Error {}
+
+  // Capture strategy 2 (experimental, opt-in) — see the RULE block above.
+  // Renders a fixed number of frames (not a real-time budget), assigning
+  // each an explicit timestamp from its own index, so the muxed file's
+  // duration is correct by construction rather than by keeping pace with a
+  // deadline. isCancelled() is polled between frames so a stuck/slow
+  // encoder can be bailed out of cleanly instead of hanging the page.
+  async function exportVideoWebCodecs({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled }){
+    const bitrate = Math.round(Math.min(VIDEO_MAX_BITRATE_EXPERIMENTAL, Math.max(VIDEO_MIN_BITRATE_EXPERIMENTAL,
+      outW * outH * VIDEO_FPS * VIDEO_BITS_PER_PIXEL_PER_FRAME)));
+    // Try VP9 first (better compression at this bitrate), fall back to VP8
+    // for browsers/configs that support WebCodecs but not a VP9 encoder.
+    const codecCandidates = [
+      { codec: 'vp09.00.10.08', mkvCodecId: 'V_VP9' },
+      { codec: 'vp8', mkvCodecId: 'V_VP8' },
+    ];
+    let chosen = null;
+    for(const candidate of codecCandidates){
+      const config = { codec: candidate.codec, width: outW, height: outH, bitrate, framerate: VIDEO_FPS };
+      const support = await VideoEncoder.isConfigSupported(config);
+      if(support.supported){ chosen = candidate; break; }
+    }
+    if(!chosen) throw new Error('no supported WebCodecs video codec found');
+
+    const muxer = new WebMMuxer.Muxer({
+      target: new WebMMuxer.ArrayBufferTarget(),
+      video: { codec: chosen.mkvCodecId, width: outW, height: outH, frameRate: VIDEO_FPS },
+    });
+    let encoderError = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (e) => { encoderError = e; },
+    });
+    encoder.configure({ codec: chosen.codec, width: outW, height: outH, bitrate, framerate: VIDEO_FPS });
+
+    try{
+      const totalFrames = Math.max(1, Math.round(totalSeconds * VIDEO_FPS));
+      const frameDurationUs = 1e6 / VIDEO_FPS;
+      const KEYFRAME_INTERVAL = VIDEO_FPS * 2; // roughly one keyframe every 2s, for seekability
+      for(let i=0; i<totalFrames; i++){
+        if(isCancelled()) throw new VideoExportCancelled();
+        if(encoderError) throw encoderError;
+        const elapsedMs = i * (1000 / VIDEO_FPS);
+        const frameT = (elapsedMs % cycleMs) / cycleMs;
+        const img = await svgFrameToImage(buildFrameSvgMarkup(frameT));
+        ctx.clearRect(0, 0, outW, outH);
+        ctx.drawImage(img, 0, 0, outW, outH);
+
+        // Backpressure: VideoEncoder queues encode work asynchronously —
+        // without this, a fast rendering loop feeding a slower encoder
+        // would pile up unbounded memory in queued VideoFrames.
+        while(encoder.encodeQueueSize > 4){
+          if(isCancelled()) throw new VideoExportCancelled();
+          await new Promise(r => setTimeout(r, 0));
+        }
+        const frame = new VideoFrame(canvas, { timestamp: Math.round(i * frameDurationUs) });
+        encoder.encode(frame, { keyFrame: i % KEYFRAME_INTERVAL === 0 });
+        frame.close();
+
+        progress.textContent = `Encoding video (experimental): frame ${i+1} / ${totalFrames} — click Cancel export if this stalls…`;
+        await new Promise(r => setTimeout(r, 0)); // yield so the UI (and Cancel button) stays responsive
+      }
+      await encoder.flush();
+      if(encoderError) throw encoderError;
+    } finally {
+      if(encoder.state !== 'closed') encoder.close();
+    }
+    muxer.finalize();
+    const { buffer } = muxer.target;
+    return { blob: new Blob([buffer], { type: 'video/webm' }), ext: 'webm', fpsNote: null };
+  }
+
+  // Capture strategy 1 (standard, default) — see the RULE block above.
+  async function exportVideoMediaRecorder({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled }){
+    const stream = canvas.captureStream(VIDEO_FPS);
+    const [videoTrack] = stream.getVideoTracks();
+    const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const mimeType = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: VIDEO_BITRATE });
+    const chunks = [];
+    recorder.ondataavailable = (e) => { if(e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+
+    recorder.start();
+    const totalMs = totalSeconds * 1000;
+    const frameInterval = 1000 / VIDEO_FPS;
+    const startTime = performance.now();
+    let nextDrawTime = startTime;
+    let framesDrawn = 0;
+    let cancelled = false;
+    while(true){
+      if(isCancelled()){ cancelled = true; break; }
+      const now = performance.now();
+      const elapsed = now - startTime;
+      if(elapsed >= totalMs) break;
+      if(now < nextDrawTime){
+        await new Promise(r => setTimeout(r, Math.min(nextDrawTime - now, 50)));
+        continue;
+      }
+      const frameT = (elapsed % cycleMs) / cycleMs;
+      const img = await svgFrameToImage(buildFrameSvgMarkup(frameT));
+      ctx.clearRect(0, 0, outW, outH);
+      ctx.drawImage(img, 0, 0, outW, outH);
+      videoTrack.requestFrame();
+      framesDrawn++;
+      nextDrawTime += frameInterval;
+      progress.textContent = `Recording video: ${(elapsed/1000).toFixed(1)}s / ${totalSeconds.toFixed(1)}s…`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+    recorder.stop();
+    await stopped;
+    if(cancelled) throw new VideoExportCancelled();
+
+    const blob = new Blob(chunks, { type: mimeType });
+    const ext = mimeType.includes('webm') ? 'webm' : 'mp4';
+    const avgFps = (framesDrawn / totalSeconds).toFixed(1);
+    return { blob, ext, fpsNote: `~${avgFps}fps` };
+  }
+
+  // RULE: the export button doubles as a Cancel button while an export is
+  // running — set once here so a click during export can find and clear it
+  // instead of trying to start a second export.
+  let videoExportCancelRequested = false;
+  let videoExportInProgress = false;
+
   document.getElementById('btn-export-video').addEventListener('click', async () => {
     const progress = document.getElementById('progress');
+    const btn = document.getElementById('btn-export-video');
+
+    if(videoExportInProgress){
+      videoExportCancelRequested = true;
+      btn.textContent = 'Cancelling…';
+      btn.disabled = true;
+      return;
+    }
+
     if(!document.getElementById('chk-animate').checked){
       progress.textContent = 'Turn on "Animate glow" first — a video needs something to animate.';
       setTimeout(()=>{ progress.textContent=''; }, 4000);
       return;
     }
-    if(typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream){
+    const useExperimental = document.getElementById('chk-experimental-video').checked;
+    const hasWebCodecs = typeof VideoEncoder !== 'undefined' && typeof WebMMuxer !== 'undefined';
+    if(useExperimental && !hasWebCodecs){
+      progress.textContent = 'Experimental export needs a browser with WebCodecs support — uncheck it to use the standard export.';
+      setTimeout(()=>{ progress.textContent=''; }, 4000);
+      return;
+    }
+    if(!useExperimental && (typeof MediaRecorder === 'undefined' || !HTMLCanvasElement.prototype.captureStream)){
       progress.textContent = 'Video export needs a browser with MediaRecorder + canvas.captureStream support.';
       setTimeout(()=>{ progress.textContent=''; }, 4000);
       return;
     }
 
-    const btn = document.getElementById('btn-export-video');
     const originalLabel = btn.textContent;
-    btn.disabled = true;
+    videoExportInProgress = true;
+    videoExportCancelRequested = false;
+    btn.textContent = 'Cancel export';
     let canvas;
 
     try{
       const cycles = Math.max(1, Math.min(6, parseInt(document.getElementById('num-video-cycles').value) || 1));
       const totalSeconds = CYCLE * cycles;
-      const scale = Math.min(1, VIDEO_MAX_DIM / Math.max(W, H));
+      const cycleMs = CYCLE * 1000;
+      const maxDim = useExperimental ? VIDEO_MAX_DIM_EXPERIMENTAL : VIDEO_MAX_DIM;
+      const scale = Math.min(1, maxDim / Math.max(W, H));
       const outW = Math.max(1, Math.round(W*scale)), outH = Math.max(1, Math.round(H*scale));
 
       canvas = document.createElement('canvas');
       canvas.width = outW; canvas.height = outH;
       // RULE: some browsers only actually paint (and therefore only ever
-      // feed real frames into captureStream) a canvas that's part of the
-      // rendered document — an off-DOM canvas can record as an essentially
-      // empty file. Keep it in the layout but pushed off-screen (not
-      // display:none/visibility:hidden, which some browsers also skip
-      // painting for) so it's invisible without breaking capture.
+      // feed real frames into captureStream, or resolve VideoFrame source
+      // data) a canvas that's part of the rendered document — an off-DOM
+      // canvas can produce an essentially empty capture. Keep it in the
+      // layout but pushed off-screen (not display:none/visibility:hidden,
+      // which some browsers also skip painting for) so it's invisible
+      // without breaking capture.
       canvas.style.cssText = 'position:fixed;left:-99999px;top:0;';
       document.body.appendChild(canvas);
       const ctx = canvas.getContext('2d');
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
 
-      // Automatic-rate capture (not frameRequestRate 0/manual-only): under
-      // real-time encoder backpressure — a heavy diagram at this resolution
-      // can produce frames faster than the encoder can keep up with — a
-      // fully-manual stream simply drops the frames it can't keep up with,
-      // which was truncating the exported clip to a fraction of its
-      // intended length. The automatic timer instead keeps re-presenting
-      // the last drawn frame to fill any gap, so the recording's duration
-      // stays correct even when the frame RATE has to drop. Still call
-      // track.requestFrame() right after each drawImage (below) so a fresh
-      // frame reaches the recorder as promptly as possible on top of that
-      // safety net, instead of waiting on the timer's own next tick.
-      const stream = canvas.captureStream(VIDEO_FPS);
-      const [videoTrack] = stream.getVideoTracks();
-      const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
-      const mimeType = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: VIDEO_BITRATE });
-      const chunks = [];
-      recorder.ondataavailable = (e) => { if(e.data && e.data.size) chunks.push(e.data); };
-      const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+      const isCancelled = () => videoExportCancelRequested;
+      const result = useExperimental
+        ? await exportVideoWebCodecs({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled })
+        : await exportVideoMediaRecorder({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled });
 
-      // RULE: drive the loop off a real-time budget (totalMs), not a fixed
-      // frame count. A dense diagram can take longer than 1/30s to render
-      // and rasterize a single frame — if each draw simply waited its own
-      // 1/fps slot regardless, the recording session's WALL-CLOCK length
-      // (which is what actually determines the exported clip's duration,
-      // since MediaRecorder just records however long it runs) would
-      // balloon past the intended length, and the clip would play back in
-      // slow motion. Instead: stop as soon as `totalMs` of real time have
-      // elapsed no matter how many frames that allowed, so the exported
-      // clip's duration and playback speed are always correct — a heavy
-      // diagram trades frame rate for that, not correctness.
-      recorder.start();
-      const totalMs = totalSeconds * 1000;
-      const cycleMs = CYCLE * 1000;
-      const frameInterval = 1000 / VIDEO_FPS;
-      const startTime = performance.now();
-      let nextDrawTime = startTime;
-      let framesDrawn = 0;
-      while(true){
-        const now = performance.now();
-        const elapsed = now - startTime;
-        if(elapsed >= totalMs) break;
-        if(now < nextDrawTime){
-          await new Promise(r => setTimeout(r, Math.min(nextDrawTime - now, 50)));
-          continue;
-        }
-        const frameT = (elapsed % cycleMs) / cycleMs;
-        const svgInner = render(frameT);
-        const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${svgInner}</svg>`;
-        const img = await svgFrameToImage(svgMarkup);
-        ctx.clearRect(0, 0, outW, outH);
-        ctx.drawImage(img, 0, 0, outW, outH);
-        videoTrack.requestFrame();
-        framesDrawn++;
-        nextDrawTime += frameInterval;
-        progress.textContent = `Recording video: ${(elapsed/1000).toFixed(1)}s / ${totalSeconds.toFixed(1)}s…`;
-        await new Promise(r => setTimeout(r, 0)); // always yield so the browser's capture pipeline can run
-      }
-      recorder.stop();
-      await stopped;
-
-      const blob = new Blob(chunks, { type: mimeType });
-      const ext = mimeType.includes('webm') ? 'webm' : 'mp4';
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(result.blob);
       const a = document.createElement('a');
-      a.href = url; a.download = `flow_weave_${variationCount}.${ext}`;
+      a.href = url; a.download = `flow_weave_${variationCount}.${result.ext}`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      const avgFps = (framesDrawn / totalSeconds).toFixed(1);
-      progress.textContent = `Done — video exported (${cycles} loop${cycles>1?'s':''}, ~${avgFps}fps).`;
+      progress.textContent = `Done — video exported (${cycles} loop${cycles>1?'s':''}${result.fpsNote ? `, ${result.fpsNote}` : ''}).`;
       setTimeout(()=>{ progress.textContent=''; }, 4000);
     } catch(err){
-      progress.textContent = 'Video export failed: ' + (err && err.message ? err.message : err);
+      if(err instanceof VideoExportCancelled){
+        progress.textContent = 'Export cancelled.';
+        setTimeout(()=>{ progress.textContent=''; }, 3000);
+      } else {
+        progress.textContent = 'Video export failed: ' + (err && err.message ? err.message : err);
+      }
     } finally {
       if(canvas && canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      videoExportInProgress = false;
+      videoExportCancelRequested = false;
       btn.disabled = false;
       btn.textContent = originalLabel;
       render(); // restore the live animated preview after off-DOM frame rendering
