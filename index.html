@@ -147,12 +147,12 @@
 
       <label class="checkbox-row">
         <input type="checkbox" id="chk-show-target-deg">
-        Show target &amp; DEG only (fade rest 50%)
+        Show target &amp; DEG only (fade rest 20%)
       </label>
 
       <label class="checkbox-row">
         <input type="checkbox" id="chk-show-proteins-tfs">
-        Show proteins &amp; TFs only (fade rest 50%)
+        Show proteins &amp; TFs only (fade rest 20%)
       </label>
 
       <label class="field">Style</label>
@@ -1152,7 +1152,7 @@
     // for "highlight everything" rather than a confusing double-negative.
     const showTargetDegOnly = document.getElementById('chk-show-target-deg').checked;
     const showProteinsTfsOnly = document.getElementById('chk-show-proteins-tfs').checked;
-    const FADE_OPACITY = 0.5;
+    const FADE_OPACITY = 0.2;
     // Layer 0 is always the target; the last layer is always the DEG; the
     // second-to-last is the TFs; everything else in between is a protein.
     function layerCategory(li){
