@@ -410,17 +410,25 @@
   function buildLayerCounts(targets, numLayers, nodesPerLayer){
     const counts = [targets];
     const tailLen = numLayers - 1;
+    // RULE: every downstream layer — especially the taper's tail ends (the
+    // layer right after targets, and the DEG layer itself) — needs at
+    // least `targets` nodes to draw from. Without this floor, a small
+    // tapered layer forces every target's pathway through the same
+    // handful of nodes purely by pigeonhole, which guarantees near-total
+    // DEG overlap between targets regardless of how connections are
+    // chosen afterward.
+    const floor = Math.max(2, targets);
     if(compositionMode === 'complex'){
       for(let k=0; k<tailLen; k++){
-        counts.push(Math.max(2, nodesPerLayer - Math.floor(Math.random()*2)));
+        counts.push(Math.max(floor, nodesPerLayer - Math.floor(Math.random()*2)));
       }
     } else {
       const centerK = Math.round((tailLen - 1) / 2);
       const halfRange = Math.max(centerK, tailLen - 1 - centerK, 1);
       for(let k=0; k<tailLen; k++){
         const dist = Math.abs(k - centerK) / halfRange;
-        let c = Math.round(nodesPerLayer - dist * Math.max(0, nodesPerLayer - 2));
-        c = Math.max(2, Math.min(nodesPerLayer, c));
+        let c = Math.round(nodesPerLayer - dist * Math.max(0, nodesPerLayer - floor));
+        c = Math.max(floor, Math.min(nodesPerLayer, c));
         counts.push(c);
       }
     }
@@ -796,9 +804,22 @@
     // look identical to the hollow "unattached" ones).
     // Kept per-stage (not just flattened) so the animated glow can travel
     // along exactly the same connections that are actually drawn.
+    //
+    // RULE: each target is also assigned its own "lane" (just its own
+    // index), inherited forward stage-by-stage by whichever node it
+    // actually connects to first (see buildStageLines) — real lineage, not
+    // an arbitrary per-layer label — so a target's downstream reach stays
+    // mostly confined to its own lineage instead of fanning out to
+    // saturate the entire next layer within a couple of hops. A target is
+    // meant to be fairly specific to a subset of DEGs, with only some
+    // cross-lineage overlap, not affect nearly all of them.
     stageLines = [];
+    let laneCursor = layers[0].map((_,i) => i);
     for(let li=0; li<layers.length-1; li++){
-      stageLines.push(buildStageLines(layers[li], layers[li+1]));
+      const isFinalStage = li === layers.length-2;
+      const built = buildStageLines(layers[li], layers[li+1], laneCursor, isFinalStage);
+      stageLines.push(built.lines);
+      laneCursor = built.lanes;
     }
     lines = stageLines.flat();
     nodeArrivalTimes = computeNodeArrivalTimes();
@@ -986,21 +1007,61 @@
   // each node picks 1..maxDegree partners (2 for Simple, up to 5 for
   // Complex — a function of compositionMode only), then any node left with
   // zero connections gets one forced connection so nothing ends up orphaned.
-  function buildStageLines(fromPts, toPts){
+  //
+  // fromLanes (optional) tags each "from" node with the target-lane it
+  // belongs to — for layer 0 that's just its own target index, and for
+  // every layer after that it's whatever this same function returned as
+  // `toLanes` for the previous stage. A "to" node's lane is decided lazily,
+  // the first time anything connects to it, and never changes afterward —
+  // real lineage inherited from whichever upstream node claimed it first,
+  // not an arbitrary per-layer label. Candidates are ranked so a "from"
+  // node prefers (in order): a "to" node already claimed by its own lane,
+  // then any still-unclaimed "to" node (free territory to colonize into
+  // its lane), then a "to" node already claimed by a different lane. That
+  // keeps each target's reach concentrated in its own lineage through many
+  // stages instead of diffusing across the whole layer the way a purely
+  // local/distance-based bias would over a long chain. In-degree is also
+  // capped at exactly 1 per node whenever lanes are active — deep chains
+  // (Complex runs 9-10 stages) mean even a small per-stage convergence
+  // allowance compounds into full saturation within just a few hops,
+  // because reachability only ever grows, never shrinks, hop over hop; a
+  // strict one-parent-per-node rule turns each stage into a clean
+  // partition instead, so a target's reach stays a bounded subset no
+  // matter how deep the chain runs. isFinalStage (the last, TF→DEG
+  // transition) relaxes that to 2 incoming edges — real, visible overlap
+  // exactly where it matters most (shared DEGs), without reopening the
+  // deep-chain compounding problem since it's only the very last hop.
+  function buildStageLines(fromPts, toPts, fromLanes, isFinalStage){
     const F = fromPts.length, T = toPts.length;
     const maxDegree = MAX_DEGREE[compositionMode];
-    const maxInDegree = MAX_IN_DEGREE[compositionMode];
+    const maxInDegree = fromLanes ? (isFinalStage ? 2 : 1) : MAX_IN_DEGREE[compositionMode];
     const fromDeg = new Array(F).fill(0);
     const toDeg = new Array(T).fill(0);
+    const toLaneOf = new Array(T).fill(null);
     const seen = new Set();
     const edges = [];
+
+    function laneOrderedCandidates(fi){
+      const all = shuffleArr(Array.from({length:T}, (_,i)=>i));
+      if(!fromLanes) return all;
+      const lane = fromLanes[fi];
+      const rank = (ti) => toLaneOf[ti] === lane ? 0 : (toLaneOf[ti] === null ? 1 : 2);
+      // stable sort: `all` is already shuffled, so ties (same rank) stay in
+      // random order rather than always favoring lower indices.
+      return all.slice().sort((a,b) => rank(a)-rank(b));
+    }
+
+    function connectEdge(fi, ti){
+      seen.add(fi+'-'+ti);
+      edges.push([fi, ti]);
+      fromDeg[fi]++; toDeg[ti]++;
+      if(fromLanes && toLaneOf[ti] === null) toLaneOf[ti] = fromLanes[fi];
+    }
 
     function tryConnect(fi, ti){
       const key = fi + '-' + ti;
       if(seen.has(key) || fromDeg[fi] >= maxDegree || toDeg[ti] >= maxInDegree) return false;
-      seen.add(key);
-      edges.push([fi, ti]);
-      fromDeg[fi]++; toDeg[ti]++;
+      connectEdge(fi, ti);
       return true;
     }
 
@@ -1018,39 +1079,80 @@
     // each "from" node picks between 1 and maxDegree partners — Complex
     // skews toward the top of that range (mostly maxDegree or one less) so
     // the mesh stays dense throughout instead of averaging out sparse.
-    shuffleArr(Array.from({length:F}, (_,i)=>i)).forEach(fi => {
+    //
+    // RULE: this happens in two passes when lanes are in play. A single
+    // shuffled pass, where whichever from-node happens to go first can
+    // claim its *entire* desired degree from the still-fully-unclaimed to
+    // layer, starves every other lane of a foothold — with a wide layer and
+    // few lanes (Complex's defaults), the first couple of movers can claim
+    // the whole layer before anyone else gets a turn, forcing every other
+    // lane into cross-lane fallbacks. So: pass 1 gives every from-node
+    // exactly one pick, round-robin, guaranteeing every lane represented in
+    // this layer secures at least one node of its own before pass 2 lets
+    // anyone grow beyond that. Cross-lane connections are further capped at
+    // CROSS_LANE_BUDGET per node even if `degree` isn't otherwise met — a
+    // from-node whose lane has no room left just ends up with a lower
+    // degree than the ideal, rather than bleeding into other targets'
+    // territory to hit it.
+    const CROSS_LANE_BUDGET = 1;
+    const fromOrder = shuffleArr(Array.from({length:F}, (_,i)=>i));
+    if(fromLanes){
+      fromOrder.forEach(fi => {
+        for(const ti of laneOrderedCandidates(fi)){
+          if(tryConnect(fi, ti)) break;
+        }
+      });
+    }
+    fromOrder.forEach(fi => {
       const degree = compositionMode === 'complex'
         ? Math.min(T, Math.max(1, maxDegree - Math.floor(Math.random() * 2)))
         : Math.min(T, 1 + Math.floor(Math.random() * maxDegree));
-      const candidates = shuffleArr(Array.from({length:T}, (_,i)=>i));
-      let picked = 0;
+      const candidates = laneOrderedCandidates(fi);
+      let picked = fromDeg[fi], crossLaneBudget = fromLanes ? CROSS_LANE_BUDGET : Infinity;
       for(const ti of candidates){
         if(picked >= degree) break;
-        if(tryConnect(fi, ti)) picked++;
+        const isCrossLane = fromLanes && toLaneOf[ti] !== null && toLaneOf[ti] !== fromLanes[fi];
+        if(isCrossLane && crossLaneBudget <= 0) continue;
+        if(tryConnect(fi, ti)){
+          picked++;
+          if(isCrossLane) crossLaneBudget--;
+        }
       }
     });
 
-    // guarantee every "to" node has at least one connection
+    // guarantee every "to" node has at least one connection — prefer a
+    // same-lane "from" node first so this fallback doesn't itself blur the
+    // lanes the pass above just established.
     shuffleArr(Array.from({length:T}, (_,i)=>i)).forEach(ti => {
       if(toDeg[ti] > 0) return;
-      const underCap = shuffleArr(Array.from({length:F}, (_,i)=>i)).filter(fi => fromDeg[fi] < maxDegree);
+      const lane = toLaneOf[ti];
+      const allUnderCap = shuffleArr(Array.from({length:F}, (_,i)=>i)).filter(fi => fromDeg[fi] < maxDegree);
+      const sameLaneUnderCap = lane != null ? allUnderCap.filter(fi => fromLanes[fi] === lane) : [];
+      const underCap = sameLaneUnderCap.length ? sameLaneUnderCap : allUnderCap;
       if(underCap.length){ tryConnect(underCap[0], ti); return; }
       // structurally forced (e.g. a single first-layer node reaching
       // several next-layer nodes) — connect anyway, just past the usual
       // cap, onto whichever "from" node has spare capacity least often used.
       const fi = leastLoadedPartner(F, fromDeg, i => seen.has(i+'-'+ti));
       const key = fi+'-'+ti;
-      if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
+      if(!seen.has(key)) connectEdge(fi, ti);
     });
 
-    // guarantee every "from" node has at least one connection
+    // guarantee every "from" node has at least one connection — same idea.
+    // With the round-robin seeding pass above, this should rarely trigger;
+    // when it does, prefer whichever candidate is least loaded rather than
+    // an arbitrary shuffled one, so any unavoidable forced connection
+    // spreads out instead of piling onto whichever node happens first.
     shuffleArr(Array.from({length:F}, (_,i)=>i)).forEach(fi => {
       if(fromDeg[fi] > 0) return;
-      const underCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < maxInDegree);
+      const lane = fromLanes ? fromLanes[fi] : null;
+      const allUnderCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < maxInDegree);
+      const sameLaneUnderCap = lane != null ? allUnderCap.filter(ti => toLaneOf[ti] === lane || toLaneOf[ti] === null) : [];
+      const underCap = (sameLaneUnderCap.length ? sameLaneUnderCap : allUnderCap).sort((a,b) => toDeg[a]-toDeg[b]);
       if(underCap.length){ tryConnect(fi, underCap[0]); return; }
       const ti = leastLoadedPartner(T, toDeg, i => seen.has(fi+'-'+i));
       const key = fi+'-'+ti;
-      if(!seen.has(key)){ seen.add(key); edges.push([fi, ti]); fromDeg[fi]++; toDeg[ti]++; }
+      if(!seen.has(key)) connectEdge(fi, ti);
     });
 
     // RULE: every connection gets its own random bow (a perpendicular
@@ -1073,12 +1175,20 @@
     // kept so render() can look up each node's own arrival times — see
     // computeNodeArrivalTimes — needed to give each target its own staggered
     // start instead of every pulse departing at the same instant.
-    return edges.map(([fi,ti]) => ({
-      x0: fromPts[fi].x, y0: fromPts[fi].y,
-      x1: toPts[ti].x, y1: toPts[ti].y,
-      bow: randomBow(),
-      srcIndex: fi, dstIndex: ti
-    }));
+    //
+    // toLaneOf is handed back so the next stage can use it as its own
+    // fromLanes — any "to" node that somehow ended up unclaimed (shouldn't
+    // happen given the guarantees above, but just in case) falls back to
+    // its own index so it still propagates *some* lane forward.
+    return {
+      lines: edges.map(([fi,ti]) => ({
+        x0: fromPts[fi].x, y0: fromPts[fi].y,
+        x1: toPts[ti].x, y1: toPts[ti].y,
+        bow: randomBow(),
+        srcIndex: fi, dstIndex: ti
+      })),
+      lanes: toLaneOf.map((l,i) => l === null ? i : l)
+    };
   }
 
   // shared bezier path builder for a connection — used identically for the
@@ -1143,16 +1253,19 @@
     const pathwayArrival0 = singlePathwayOn ? nodeArrivalTimes[0][0][0] : null;
     const flatOpacity = 0.82;
 
-    // RULE: "Show target & DEG only" / "Show proteins & TFs only" fade
-    // (not hide) everything outside the chosen category to 50%, so the
-    // diagram still reads as a whole while the chosen role pops out. The
-    // two toggles combine by union rather than intersection — since every
-    // layer is exactly one of target/protein/TF/DEG, having BOTH on covers
-    // every category and so fades nothing, which is the sensible behavior
-    // for "highlight everything" rather than a confusing double-negative.
+    // RULE: "Show target & DEG only" / "Show proteins & TFs only" HIDE
+    // every node outside the chosen category outright — but every LINE
+    // still renders at full, untouched opacity regardless of category, so
+    // the connecting curves read as a single continuous, undimmed path
+    // running all the way from target to DEG (through wherever a
+    // now-hidden protein/TF node used to sit) rather than a route stitched
+    // together out of faded segments. The two toggles combine by union
+    // rather than intersection for node visibility — since every layer is
+    // exactly one of target/protein/TF/DEG, having BOTH on covers every
+    // category and so hides nothing, the sensible behavior for "show
+    // everything" rather than a confusing double-negative.
     const showTargetDegOnly = document.getElementById('chk-show-target-deg').checked;
     const showProteinsTfsOnly = document.getElementById('chk-show-proteins-tfs').checked;
-    const FADE_OPACITY = 0.2;
     // Layer 0 is always the target; the last layer is always the DEG; the
     // second-to-last is the TFs; everything else in between is a protein.
     function layerCategory(li){
@@ -1167,16 +1280,6 @@
       const cat = layerCategory(li);
       return (showTargetDegOnly && (cat === 'target' || cat === 'deg'))
           || (showProteinsTfsOnly && (cat === 'protein' || cat === 'tf'));
-    }
-    // A line spans two layers — only reads as "highlighted" when both its
-    // ends are, so e.g. "Show target & DEG only" fades every connecting
-    // line (since target and DEG are essentially never adjacent layers),
-    // leaving just the two endpoint node types standing out.
-    function isLineHighlighted(li){
-      return isLayerHighlighted(li) && isLayerHighlighted(li+1);
-    }
-    function fadeWrap(markup, highlighted){
-      return highlighted ? markup : `<g opacity="${FADE_OPACITY}">${markup}</g>`;
     }
 
     const stops = GRADIENT_STOPS[currentPalette];
@@ -1229,7 +1332,7 @@
     stageLines.forEach((stage, li) => {
       stage.forEach((l) => {
         if(singlePathwayOn && !pathwayEdgeSet.has(l)) return;
-        paths += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`, isLineHighlighted(li));
+        paths += `<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`;
       });
     });
 
@@ -1262,17 +1365,16 @@
             const t1 = t0 + stageFrac;
             const sweepPts = sweepPoints(t0, t1, 0, -(1-DASH_LEN));
             const fadePts = pulseOpacityPoints(t0, t1, CROSSFADE, PULSE_OPACITY);
-            const lineHighlighted = isLineHighlighted(li);
             if(frameT != null){
               const dashOffset = sampleEnvelopeAtT(sweepPts, frameT);
               const op = sampleEnvelopeAtT(fadePts, frameT);
               if(op <= 0.002) return; // skip invisible pulses to keep frame markup small
-              pulseMk += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`, lineHighlighted);
+              pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`;
               return;
             }
             const sweep = buildEnvelope(sweepPts);
             const fade = buildEnvelope(fadePts);
-            pulseMk += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`, lineHighlighted);
+            pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
           });
         });
       }
@@ -1464,8 +1566,7 @@
         nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"><animate attributeName="r" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
         } finally {
           if(!highlighted && nodesMk.length > nodesMkStart){
-            const added = nodesMk.slice(nodesMkStart);
-            nodesMk = nodesMk.slice(0, nodesMkStart) + fadeWrap(added, false);
+            nodesMk = nodesMk.slice(0, nodesMkStart);
           }
         }
       });
@@ -1485,7 +1586,7 @@
             + `<polygon points="${squarePoints(pt.x,pt.y,3.4*sizeScale)}" fill="none" stroke="#ffffff" stroke-width="1.3" opacity="0.5"/>`
           : `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(7*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.22"/>`
             + `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(3.4*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1.3" opacity="0.5"/>`;
-        nodesMk += fadeWrap(mk, highlighted);
+        if(highlighted) nodesMk += mk;
       });
     });
 
