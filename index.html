@@ -1253,19 +1253,21 @@
     const pathwayArrival0 = singlePathwayOn ? nodeArrivalTimes[0][0][0] : null;
     const flatOpacity = 0.82;
 
-    // RULE: "Show target & DEG only" / "Show proteins & TFs only" HIDE
-    // every node outside the chosen category outright — but every LINE
-    // still renders at full, untouched opacity regardless of category, so
-    // the connecting curves read as a single continuous, undimmed path
-    // running all the way from target to DEG (through wherever a
-    // now-hidden protein/TF node used to sit) rather than a route stitched
-    // together out of faded segments. The two toggles combine by union
-    // rather than intersection for node visibility — since every layer is
-    // exactly one of target/protein/TF/DEG, having BOTH on covers every
-    // category and so hides nothing, the sensible behavior for "show
-    // everything" rather than a confusing double-negative.
+    // RULE: the two category toggles behave differently on purpose.
+    // "Show target & DEG only" HIDES every protein/TF node outright, and
+    // never touches line opacity at all, so the connecting curves read as
+    // a single continuous, undimmed path running all the way from target
+    // to DEG (through wherever a now-hidden protein/TF node used to sit)
+    // rather than a route stitched together out of faded segments.
+    // "Show proteins & TFs only" instead FADES target/DEG nodes AND their
+    // lines to 20% opacity, keeping them visible as dim context.
+    // When both are on, every layer is exactly one of target/protein/TF/
+    // DEG, so between the two toggles every category is explicitly
+    // "shown" by one of them — nothing gets hidden or faded, which reads
+    // as "show everything" rather than a confusing double-negative.
     const showTargetDegOnly = document.getElementById('chk-show-target-deg').checked;
     const showProteinsTfsOnly = document.getElementById('chk-show-proteins-tfs').checked;
+    const FADE_OPACITY = 0.2;
     // Layer 0 is always the target; the last layer is always the DEG; the
     // second-to-last is the TFs; everything else in between is a protein.
     function layerCategory(li){
@@ -1275,11 +1277,31 @@
       if(li === lastLayer - 1) return 'tf';
       return 'protein';
     }
-    function isLayerHighlighted(li){
-      if(!showTargetDegOnly && !showProteinsTfsOnly) return true;
+    // Whether a node in this layer should be hidden entirely — only "Show
+    // target & DEG only" ever hides anything, and only when the other
+    // toggle isn't also active rescuing this category into "show everything".
+    function isLayerHidden(li){
+      if(!showTargetDegOnly) return false;
       const cat = layerCategory(li);
-      return (showTargetDegOnly && (cat === 'target' || cat === 'deg'))
-          || (showProteinsTfsOnly && (cat === 'protein' || cat === 'tf'));
+      if(cat === 'target' || cat === 'deg') return false;
+      return !showProteinsTfsOnly;
+    }
+    // Whether a node in this layer should be faded to 20% — only "Show
+    // proteins & TFs only" ever fades anything, same rescue rule as above.
+    function isLayerFaded(li){
+      if(!showProteinsTfsOnly) return false;
+      const cat = layerCategory(li);
+      if(cat === 'protein' || cat === 'tf') return false;
+      return !showTargetDegOnly;
+    }
+    // A line fades if EITHER endpoint layer would be faded — never hidden,
+    // since "Show target & DEG only" (the only hide-causing toggle) never
+    // touches line opacity at all.
+    function isLineFaded(li){
+      return isLayerFaded(li) || isLayerFaded(li+1);
+    }
+    function fadeWrap(markup, faded){
+      return faded ? `<g opacity="${FADE_OPACITY}">${markup}</g>` : markup;
     }
 
     const stops = GRADIENT_STOPS[currentPalette];
@@ -1330,9 +1352,10 @@
 
     let paths = '';
     stageLines.forEach((stage, li) => {
+      const lineFaded = isLineFaded(li);
       stage.forEach((l) => {
         if(singlePathwayOn && !pathwayEdgeSet.has(l)) return;
-        paths += `<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`;
+        paths += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`, lineFaded);
       });
     });
 
@@ -1348,6 +1371,7 @@
       const CROSSFADE = 0.045;              // fraction of the full cycle, for the handoff overlap
       const PULSE_OPACITY = 0.5;            // translucent, not solid white
       for(let li=0; li<stageLines.length; li++){
+        const lineFaded = isLineFaded(li);
         stageLines[li].forEach(l => {
           if(singlePathwayOn && !pathwayEdgeSet.has(l)) return;
           // Each edge's own travel window(s) start exactly when its specific
@@ -1369,12 +1393,12 @@
               const dashOffset = sampleEnvelopeAtT(sweepPts, frameT);
               const op = sampleEnvelopeAtT(fadePts, frameT);
               if(op <= 0.002) return; // skip invisible pulses to keep frame markup small
-              pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`;
+              pulseMk += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`, lineFaded);
               return;
             }
             const sweep = buildEnvelope(sweepPts);
             const fade = buildEnvelope(fadePts);
-            pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
+            pulseMk += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`, lineFaded);
           });
         });
       }
@@ -1425,7 +1449,8 @@
         // inside a try block still runs `finally` first, so this reaches
         // every branch without editing any of them.
         const nodesMkStart = nodesMk.length;
-        const highlighted = isLayerHighlighted(li);
+        const hidden = isLayerHidden(li);
+        const faded = isLayerFaded(li);
         try{
         const x = pt.x, y = pt.y;
         // RULE: single-pathway mode isolates one target's own subtree —
@@ -1565,8 +1590,13 @@
         nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="r" keyTimes="${haloEnv.keyTimes}" values="${haloEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
         nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"><animate attributeName="r" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
         } finally {
-          if(!highlighted && nodesMk.length > nodesMkStart){
-            nodesMk = nodesMk.slice(0, nodesMkStart);
+          if(nodesMk.length > nodesMkStart){
+            if(hidden){
+              nodesMk = nodesMk.slice(0, nodesMkStart);
+            } else if(faded){
+              const added = nodesMk.slice(nodesMkStart);
+              nodesMk = nodesMk.slice(0, nodesMkStart) + fadeWrap(added, true);
+            }
           }
         }
       });
@@ -1578,15 +1608,17 @@
     // above — everything stays visible as either lit (on the isolated
     // target's subtree) or hollow (not on it), nothing just vanishes.
     unattached.forEach((pts, li) => {
-      const highlighted = isLayerHighlighted(li);
+      const hidden = isLayerHidden(li);
+      const faded = isLayerFaded(li);
       const isDeg = li === layers.length - 1;
       pts.forEach(pt => {
+        if(hidden) return;
         const mk = isDeg
           ? `<polygon points="${squarePoints(pt.x,pt.y,7*sizeScale)}" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.22"/>`
             + `<polygon points="${squarePoints(pt.x,pt.y,3.4*sizeScale)}" fill="none" stroke="#ffffff" stroke-width="1.3" opacity="0.5"/>`
           : `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(7*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.22"/>`
             + `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(3.4*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1.3" opacity="0.5"/>`;
-        if(highlighted) nodesMk += mk;
+        nodesMk += fadeWrap(mk, faded);
       });
     });
 
