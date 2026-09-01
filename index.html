@@ -145,6 +145,16 @@
         Isolate one target's pathways (target → DEG)
       </label>
 
+      <label class="checkbox-row">
+        <input type="checkbox" id="chk-show-target-deg">
+        Show target &amp; DEG only (fade rest 50%)
+      </label>
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="chk-show-proteins-tfs">
+        Show proteins &amp; TFs only (fade rest 50%)
+      </label>
+
       <label class="field">Style</label>
       <div class="btn-row">
         <button class="btn-primary" id="btn-style-structured">Structured</button>
@@ -165,6 +175,11 @@
 
       <label class="field">Targets <span class="range-val" id="val-targets">1</span></label>
       <input type="range" id="rng-targets" min="1" max="10" value="1">
+
+      <label class="checkbox-row">
+        <input type="checkbox" id="chk-extra-target">
+        Add an extra target (keeps existing targets in place)
+      </label>
 
       <label class="field">Layers <span class="range-val" id="val-layers">5</span></label>
       <input type="range" id="rng-layers" min="3" max="14" value="5">
@@ -459,6 +474,12 @@
   // Set of the exact stageLines edge objects that connect two reachable
   // nodes }.
   let singlePathway = { nodeReachable: [], edgeReachable: new Set() };
+  // "Add an extra target" — holds a snapshot of layers[0]/stageLines[0]
+  // taken right before an extra target was appended, so turning the
+  // checkbox off restores the base layout exactly rather than needing a
+  // full regenerate (which would reshuffle everything, not just remove the
+  // one bonus node). null when no extra target is currently applied.
+  let extraTargetSnapshot = null;
   let currentPalette = 'aurora';
   let variationCount = 0;
 
@@ -792,6 +813,136 @@
     return { nodeReachable, edgeReachable };
   }
 
+  // Picks a spot for a new target that doesn't require moving any existing
+  // one: finds the single largest gap among the current targets (in Y for
+  // Linear, in angle around the ring for Radial — including the open space
+  // above/below or all the way around, not just between two of them) and
+  // places the new one in the middle of it.
+  function computeGapFillTargetPosition(existingPts){
+    if(shapeMode === 'radial'){
+      if(existingPts.length === 0) return clampToCanvas({ x: radialCenter.x + radialOuterRadius, y: radialCenter.y });
+      const angles = existingPts
+        .map(p => Math.atan2(p.y - radialCenter.y, p.x - radialCenter.x))
+        .sort((a,b) => a-b);
+      let bestGap = -1, bestMid = angles[0];
+      for(let i=0;i<angles.length;i++){
+        const a0 = angles[i];
+        const a1 = i+1 < angles.length ? angles[i+1] : angles[0] + Math.PI*2;
+        const gap = a1 - a0;
+        if(gap > bestGap){ bestGap = gap; bestMid = a0 + gap/2; }
+      }
+      return clampToCanvas({
+        x: radialCenter.x + radialOuterRadius*Math.cos(bestMid),
+        y: radialCenter.y + radialOuterRadius*Math.sin(bestMid)
+      });
+    }
+    if(existingPts.length === 0) return { x: layerX[0], y: H/2 };
+    const baseX = existingPts.reduce((a,p) => a+p.x, 0) / existingPts.length;
+    const ys = existingPts.map(p => p.y).sort((a,b) => a-b);
+    let bestGap = -1, bestMid = ys[0];
+    for(let i=0;i<ys.length-1;i++){
+      const gap = ys[i+1] - ys[i];
+      if(gap > bestGap){ bestGap = gap; bestMid = (ys[i]+ys[i+1])/2; }
+    }
+    // The open space above the first / below the last target counts as a
+    // gap too — otherwise a tight cluster of targets would never place the
+    // new one anywhere but squeezed between two existing ones.
+    const topGap = ys[0] - MARGIN;
+    const bottomGap = (H - MARGIN) - ys[ys.length-1];
+    if(topGap > bestGap){ bestGap = topGap; bestMid = ys[0] - topGap/2; }
+    if(bottomGap > bestGap){ bestGap = bottomGap; bestMid = ys[ys.length-1] + bottomGap/2; }
+    return { x: baseX, y: bestMid };
+  }
+
+  // Connects ONE new source node into an already-built stage, using the
+  // same degree rules buildStageLines uses for every other node — so the
+  // new target's own connections read as if it had always been part of the
+  // generation, free to reuse existing downstream nodes (and their existing
+  // onward connections) rather than needing a separate, isolated route.
+  // Only ever adds edges — never touches any existing node's connections.
+  function connectNewTargetIntoLayer(newFromIndex, newFromPt, toPts, existingEdges){
+    const maxDegree = MAX_DEGREE[compositionMode];
+    const maxInDegree = MAX_IN_DEGREE[compositionMode];
+    const T = toPts.length;
+    const toDeg = new Array(T).fill(0);
+    existingEdges.forEach(e => { toDeg[e.dstIndex]++; });
+
+    function randomBow(){
+      if(shapeMode === 'radial'){
+        const baseBow = radialOuterRadius * 0.07;
+        const extraBow = compositionMode === 'complex' ? radialOuterRadius * 0.14 : 0;
+        return (Math.random()-0.5) * 2 * (baseBow + extraBow);
+      }
+      return compositionMode === 'complex' ? (Math.random()-0.5)*260 : 0;
+    }
+    function makeEdge(ti){
+      return {
+        x0: newFromPt.x, y0: newFromPt.y,
+        x1: toPts[ti].x, y1: toPts[ti].y,
+        bow: randomBow(),
+        srcIndex: newFromIndex, dstIndex: ti
+      };
+    }
+
+    const newEdges = [];
+    const taken = new Set();
+    function tryConnect(ti){
+      if(taken.has(ti) || toDeg[ti] >= maxInDegree) return false;
+      taken.add(ti);
+      toDeg[ti]++;
+      newEdges.push(makeEdge(ti));
+      return true;
+    }
+    const degree = compositionMode === 'complex'
+      ? Math.min(T, Math.max(1, maxDegree - Math.floor(Math.random()*2)))
+      : Math.min(T, 1 + Math.floor(Math.random()*maxDegree));
+    shuffleArr(Array.from({length:T}, (_,i)=>i)).some(ti => {
+      if(newEdges.length >= degree) return true;
+      tryConnect(ti);
+      return false;
+    });
+    // guarantee at least one connection, same as buildStageLines
+    if(newEdges.length === 0){
+      const underCap = shuffleArr(Array.from({length:T}, (_,i)=>i)).filter(ti => toDeg[ti] < maxInDegree);
+      const ti = underCap.length ? underCap[0] : Math.floor(Math.random()*T);
+      newEdges.push(makeEdge(ti));
+    }
+    return newEdges;
+  }
+
+  // Adds one extra target on top of whatever's currently laid out, without
+  // disturbing any existing node's position or connections — see
+  // computeGapFillTargetPosition/connectNewTargetIntoLayer above. Snapshots
+  // the pre-mutation state first so removeExtraTarget can restore it
+  // exactly when the checkbox is turned back off.
+  function applyExtraTarget(){
+    if(layers.length < 2) return;
+    extraTargetSnapshot = {
+      targetPts: layers[0].map(p => ({...p})),
+      stage0Edges: stageLines[0].map(e => ({...e})),
+    };
+    const newPt = computeGapFillTargetPosition(layers[0]);
+    layers[0] = [...layers[0], newPt];
+    const newIndex = layers[0].length - 1;
+    const newEdges = connectNewTargetIntoLayer(newIndex, newPt, layers[1], stageLines[0]);
+    stageLines[0] = [...stageLines[0], ...newEdges];
+
+    lines = stageLines.flat();
+    nodeArrivalTimes = computeNodeArrivalTimes();
+    singlePathway = computeSinglePathway();
+  }
+
+  function removeExtraTarget(){
+    if(!extraTargetSnapshot) return;
+    layers[0] = extraTargetSnapshot.targetPts;
+    stageLines[0] = extraTargetSnapshot.stage0Edges;
+    extraTargetSnapshot = null;
+
+    lines = stageLines.flat();
+    nodeArrivalTimes = computeNodeArrivalTimes();
+    singlePathway = computeSinglePathway();
+  }
+
   // Propagates each target's own staggered start (TARGET_PHASE_SPREAD)
   // forward through the graph as a UNION of arrival times rather than
   // collapsing to whichever upstream path gets there first — see the
@@ -977,6 +1128,42 @@
     const pathwayArrival0 = singlePathwayOn ? nodeArrivalTimes[0][0][0] : null;
     const flatOpacity = 0.82;
 
+    // RULE: "Show target & DEG only" / "Show proteins & TFs only" fade
+    // (not hide) everything outside the chosen category to 50%, so the
+    // diagram still reads as a whole while the chosen role pops out. The
+    // two toggles combine by union rather than intersection — since every
+    // layer is exactly one of target/protein/TF/DEG, having BOTH on covers
+    // every category and so fades nothing, which is the sensible behavior
+    // for "highlight everything" rather than a confusing double-negative.
+    const showTargetDegOnly = document.getElementById('chk-show-target-deg').checked;
+    const showProteinsTfsOnly = document.getElementById('chk-show-proteins-tfs').checked;
+    const FADE_OPACITY = 0.5;
+    // Layer 0 is always the target; the last layer is always the DEG; the
+    // second-to-last is the TFs; everything else in between is a protein.
+    function layerCategory(li){
+      const lastLayer = layers.length - 1;
+      if(li === 0) return 'target';
+      if(li === lastLayer) return 'deg';
+      if(li === lastLayer - 1) return 'tf';
+      return 'protein';
+    }
+    function isLayerHighlighted(li){
+      if(!showTargetDegOnly && !showProteinsTfsOnly) return true;
+      const cat = layerCategory(li);
+      return (showTargetDegOnly && (cat === 'target' || cat === 'deg'))
+          || (showProteinsTfsOnly && (cat === 'protein' || cat === 'tf'));
+    }
+    // A line spans two layers — only reads as "highlighted" when both its
+    // ends are, so e.g. "Show target & DEG only" fades every connecting
+    // line (since target and DEG are essentially never adjacent layers),
+    // leaving just the two endpoint node types standing out.
+    function isLineHighlighted(li){
+      return isLayerHighlighted(li) && isLayerHighlighted(li+1);
+    }
+    function fadeWrap(markup, highlighted){
+      return highlighted ? markup : `<g opacity="${FADE_OPACITY}">${markup}</g>`;
+    }
+
     const stops = GRADIENT_STOPS[currentPalette];
     // RULE: one shared gradient, identical for every line.
     // Linear: anchored to the full diagram's absolute x-span (layer 1 to
@@ -1024,9 +1211,11 @@
     const layerColors = LAYER_COUNTS.map((_,i) => sampleGradient(stops, i/(LAYER_COUNTS.length-1)));
 
     let paths = '';
-    lines.forEach((l)=>{
-      if(singlePathwayOn && !pathwayEdgeSet.has(l)) return;
-      paths += `<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`;
+    stageLines.forEach((stage, li) => {
+      stage.forEach((l) => {
+        if(singlePathwayOn && !pathwayEdgeSet.has(l)) return;
+        paths += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`, isLineHighlighted(li));
+      });
     });
 
     // RULE: an animated glow travels from the first layer to the last, sweeping
@@ -1058,16 +1247,17 @@
             const t1 = t0 + stageFrac;
             const sweepPts = sweepPoints(t0, t1, 0, -(1-DASH_LEN));
             const fadePts = pulseOpacityPoints(t0, t1, CROSSFADE, PULSE_OPACITY);
+            const lineHighlighted = isLineHighlighted(li);
             if(frameT != null){
               const dashOffset = sampleEnvelopeAtT(sweepPts, frameT);
               const op = sampleEnvelopeAtT(fadePts, frameT);
               if(op <= 0.002) return; // skip invisible pulses to keep frame markup small
-              pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`;
+              pulseMk += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" stroke-dashoffset="${dashOffset.toFixed(4)}" opacity="${op.toFixed(3)}" filter="url(#fw-glow)"/>`, lineHighlighted);
               return;
             }
             const sweep = buildEnvelope(sweepPts);
             const fade = buildEnvelope(fadePts);
-            pulseMk += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`;
+            pulseMk += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="${(thickness*2.2).toFixed(2)}" stroke-linecap="round" pathLength="1" stroke-dasharray="${DASH_LEN} ${(1-DASH_LEN).toFixed(3)}" filter="url(#fw-glow)"><animate attributeName="stroke-dashoffset" keyTimes="${sweep.keyTimes}" values="${sweep.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="opacity" keyTimes="${fade.keyTimes}" values="${fade.values}" dur="${CYCLE}s" repeatCount="indefinite"/></path>`, lineHighlighted);
           });
         });
       }
@@ -1104,6 +1294,15 @@
       const diamondHaloR = haloR*DIAMOND_SCALE, diamondDotR = dotR*DIAMOND_SCALE;
       const baseFill = permanentColors ? litColor : '#ffffff';
       layer.forEach((pt, ptIndex) => {
+        // RULE: rather than touching every branch below (there are many
+        // return points across the animate/frameT/permanentColors
+        // combinations), wrap the WHOLE per-node body in try/finally and
+        // retroactively fade-wrap whatever markup it appended — a `return`
+        // inside a try block still runs `finally` first, so this reaches
+        // every branch without editing any of them.
+        const nodesMkStart = nodesMk.length;
+        const highlighted = isLayerHighlighted(li);
+        try{
         const x = pt.x, y = pt.y;
         // RULE: single-pathway mode isolates one target's own subtree —
         // every node NOT reachable from it (every other target, and every
@@ -1202,6 +1401,12 @@
         const colorEnv = multiArrivalEnvelope(arrivals, COLOR_HOLD, '#ffffff', litColor);
         nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${haloR.toFixed(2)}" fill="#ffffff" opacity="0.14" filter="url(#fw-glow)"><animate attributeName="r" keyTimes="${haloEnv.keyTimes}" values="${haloEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
         nodesMk += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR.toFixed(2)}" fill="#ffffff" opacity="0.95"><animate attributeName="r" keyTimes="${dotEnv.keyTimes}" values="${dotEnv.values}" dur="${CYCLE}s" repeatCount="indefinite"/><animate attributeName="fill" keyTimes="${colorEnv.keyTimes}" values="${colorEnv.values}" calcMode="discrete" dur="${CYCLE}s" repeatCount="indefinite"/></circle>`;
+        } finally {
+          if(!highlighted && nodesMk.length > nodesMkStart){
+            const added = nodesMk.slice(nodesMkStart);
+            nodesMk = nodesMk.slice(0, nodesMkStart) + fadeWrap(added, false);
+          }
+        }
       });
     });
 
@@ -1210,10 +1415,12 @@
     // in single-pathway mode too, same as the other now-unreached nodes
     // above — everything stays visible as either lit (on the isolated
     // target's subtree) or hollow (not on it), nothing just vanishes.
-    unattached.forEach((pts) => {
+    unattached.forEach((pts, li) => {
+      const highlighted = isLayerHighlighted(li);
       pts.forEach(pt => {
-        nodesMk += `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(7*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.22"/>`;
-        nodesMk += `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(3.4*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1.3" opacity="0.5"/>`;
+        const mk = `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(7*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.22"/>`
+          + `<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(3.4*sizeScale).toFixed(2)}" fill="none" stroke="#ffffff" stroke-width="1.3" opacity="0.5"/>`;
+        nodesMk += fadeWrap(mk, highlighted);
       });
     });
 
@@ -1233,6 +1440,11 @@
 
   function fullRegenerate(){
     generateLayout();
+    // Any snapshot taken before this regenerate is now stale (the base
+    // layout it was meant to restore no longer exists) — if the extra
+    // target is still wanted, reapply it fresh on top of the new layout.
+    extraTargetSnapshot = null;
+    if(document.getElementById('chk-extra-target').checked) applyExtraTarget();
     variationCount++;
     badge.textContent = `variation ${variationCount}`;
     render();
@@ -1340,6 +1552,13 @@
   document.getElementById('chk-permanent-colors').addEventListener('change', () => render());
   document.getElementById('chk-include-bg').addEventListener('change', () => render());
   document.getElementById('chk-single-pathway').addEventListener('change', () => render());
+  document.getElementById('chk-show-target-deg').addEventListener('change', () => render());
+  document.getElementById('chk-show-proteins-tfs').addEventListener('change', () => render());
+  document.getElementById('chk-extra-target').addEventListener('change', () => {
+    if(document.getElementById('chk-extra-target').checked) applyExtraTarget();
+    else removeExtraTarget();
+    render();
+  });
 
   document.getElementById('btn-export-one').addEventListener('click', () => {
     download(`flow_weave_${variationCount}.svg`, serializeCurrentSVG(), 'image/svg+xml');
