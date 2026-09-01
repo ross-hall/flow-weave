@@ -1398,8 +1398,18 @@
   const VIDEO_MAX_DIM = 1080; // standard path — see capture strategy 1 above
   const VIDEO_BITRATE = 12_000_000; // standard path
   const VIDEO_MAX_DIM_EXPERIMENTAL = 1920; // experimental path — see capture strategy 2 above
-  const VIDEO_BITS_PER_PIXEL_PER_FRAME = 0.25;
-  const VIDEO_MIN_BITRATE_EXPERIMENTAL = 10_000_000, VIDEO_MAX_BITRATE_EXPERIMENTAL = 40_000_000;
+  // RULE: the first cut of this used bitrateMode's default ('variable'),
+  // which let the encoder spend far FEWER bits than the target on this kind
+  // of content — thin anti-aliased lines on a mostly-black background
+  // compress very "efficiently" by a rate-distortion metric that doesn't
+  // match how blurry/blocky it actually looks, so real files came out a
+  // fraction of the requested bitrate. 'constant' forces the encoder to
+  // actually spend the full target instead of deciding it doesn't need to.
+  // The target itself can also be pushed well past the standard path's
+  // ceiling now — under WebCodecs a higher bitrate only risks slower
+  // encoding (mitigated by Cancel export), not truncation.
+  const VIDEO_BITS_PER_PIXEL_PER_FRAME = 0.8;
+  const VIDEO_MIN_BITRATE_EXPERIMENTAL = 15_000_000, VIDEO_MAX_BITRATE_EXPERIMENTAL = 80_000_000;
 
   function svgFrameToImage(svgMarkup){
     return new Promise((resolve, reject) => {
@@ -1434,7 +1444,7 @@
     ];
     let chosen = null;
     for(const candidate of codecCandidates){
-      const config = { codec: candidate.codec, width: outW, height: outH, bitrate, framerate: VIDEO_FPS };
+      const config = { codec: candidate.codec, width: outW, height: outH, bitrate, framerate: VIDEO_FPS, bitrateMode: 'constant' };
       const support = await VideoEncoder.isConfigSupported(config);
       if(support.supported){ chosen = candidate; break; }
     }
@@ -1449,7 +1459,7 @@
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
       error: (e) => { encoderError = e; },
     });
-    encoder.configure({ codec: chosen.codec, width: outW, height: outH, bitrate, framerate: VIDEO_FPS });
+    encoder.configure({ codec: chosen.codec, width: outW, height: outH, bitrate, framerate: VIDEO_FPS, bitrateMode: 'constant' });
 
     try{
       const totalFrames = Math.max(1, Math.round(totalSeconds * VIDEO_FPS));
