@@ -88,14 +88,22 @@
 
   .canvas-wrap{
     flex:1; position:relative; display:flex; align-items:center; justify-content:center;
-    background: #000000;
+    background: #000000; overflow:hidden; cursor:grab; touch-action:none;
   }
+  .canvas-wrap.dragging{ cursor:grabbing; }
   .card{
     background:var(--card-bg); border-radius:10px;
     box-shadow: 0 20px 70px -10px rgba(255,46,166,.12), 0 0 0 1px rgba(255,255,255,.08);
     padding: 10px; max-height: 88vh; max-width: 92vw;
+    transform-origin: center center;
   }
   svg#stage{ display:block; height: 80vh; width:auto; max-width: 88vw; }
+  .zoom-reset{
+    position:absolute; top:16px; right:16px; z-index:2;
+    background:var(--bg-panel-2, #1a1a1f); color:var(--text, #fff); border:1px solid var(--line, #333);
+    border-radius:6px; padding:6px 12px; font-size:11.5px; cursor:pointer; opacity:0.85;
+  }
+  .zoom-reset:hover{ opacity:1; }
 
   .top-badge{
     position:absolute; top:20px; left:20px; font-family:ui-monospace,monospace;
@@ -165,6 +173,7 @@
       <div class="btn-row">
         <button class="btn-primary" id="btn-shape-linear">Linear</button>
         <button class="btn-secondary" id="btn-shape-radial">Radial</button>
+        <button class="btn-secondary" id="btn-shape-single">Single node</button>
       </div>
 
       <label class="field">Nucleus offset X <span class="range-val" id="val-nucleus-offx">0</span></label>
@@ -269,9 +278,10 @@
     </div>
   </div>
 
-  <div class="canvas-wrap">
+  <div class="canvas-wrap" id="canvas-wrap">
     <div class="top-badge" id="badge">variation 0</div>
-    <div class="card">
+    <button class="zoom-reset" id="btn-zoom-reset" title="Reset zoom/pan">Reset zoom</button>
+    <div class="card" id="zoom-card">
       <svg id="stage" xmlns="http://www.w3.org/2000/svg"></svg>
     </div>
   </div>
@@ -299,7 +309,7 @@
   const RADIAL_BASE_SIZE = { w: 1400, h: 1400 };
   const COMPLEX_SIZE_SCALE = 1.6; // Complex needs more room regardless of style/shape
   function currentCanvasSize(){
-    const base = shapeMode === 'radial' ? RADIAL_BASE_SIZE : STYLE_BASE_SIZE[styleMode];
+    const base = (shapeMode === 'radial' || shapeMode === 'single') ? RADIAL_BASE_SIZE : STYLE_BASE_SIZE[styleMode];
     const scale = compositionMode === 'complex' ? COMPLEX_SIZE_SCALE : 1;
     return { w: Math.round(base.w * scale), h: Math.round(base.h * scale) };
   }
@@ -533,6 +543,13 @@
   let radialCenter = { x: 0, y: 0 };
   let radialOuterRadius = 0;
   let radialNucleusFocus = { x: 0, y: 0 };
+  // singleNodeGroups[ptIndex] — which of the 3 groups (0/1/2) each source
+  // in layers[0] belongs to, for Single-node shape only. Positions and
+  // connections don't carry group identity on their own (a source is just
+  // a point, an edge just two indices), so this is the one piece of extra
+  // state that lets render() color a source — and the line leaving it —
+  // by its group instead of by its (shared, uninformative) layer index.
+  let singleNodeGroups = [];
 
   const stage = document.getElementById('stage');
   const badge = document.getElementById('badge');
@@ -751,16 +768,86 @@
     return { connectedPts, unattachedPts };
   }
 
+  // Single-node shape: GROUP_COUNT clusters of nodes, each fanned across
+  // its own slice of the ring (with a gap between slices so each reads as
+  // a separate group, not one continuous ring), all converging on one
+  // shared node at the canvas center. Reuses the same radialCenter/
+  // radialOuterRadius/radialNucleusFocus state as Radial shape purely so
+  // the rest of render() (the shared-gradient defs in particular) doesn't
+  // need its own case — Single-node has no actual nucleus drift, so focus
+  // is just the center.
+  const SINGLE_GROUP_COUNT = 3;
+  function singleGroupPositions(count, radius, centerAngle, arcSpan, center, radiusJitterPx, angleJitterFrac){
+    if(count === 1) return [{ x: center.x + radius*Math.cos(centerAngle), y: center.y + radius*Math.sin(centerAngle) }];
+    const slotWidth = arcSpan / count;
+    const pts = [];
+    for(let i=0;i<count;i++){
+      const slotCenter = centerAngle - arcSpan/2 + slotWidth*(i+0.5);
+      const angle = slotCenter + (Math.random()-0.5)*slotWidth*angleJitterFrac;
+      const r = radius + (Math.random()-0.5)*2*radiusJitterPx;
+      pts.push({ x: center.x + r*Math.cos(angle), y: center.y + r*Math.sin(angle) });
+    }
+    return pts;
+  }
+
+  // Every source connects directly to the single shared node — the point
+  // of this shape is one node fed by several full groups of lines, not a
+  // sparse/degree-capped subset the way the layered shapes connect.
+  function buildFullyConnectedStage(fromPts, toPts){
+    function randomBow(){
+      return styleMode === 'organic' ? (Math.random()-0.5)*90 : 0;
+    }
+    return fromPts.map((fp, fi) => ({
+      x0: fp.x, y0: fp.y, x1: toPts[0].x, y1: toPts[0].y,
+      bow: randomBow(), srcIndex: fi, dstIndex: 0
+    }));
+  }
+
   function generateLayout(){
+    layers = [];
+    unattached = [];
+    singleNodeGroups = [];
+
+    if(shapeMode === 'single'){
+      radialCenter = { x: W/2, y: H/2 };
+      radialOuterRadius = Math.min(W, H)/2 - MARGIN;
+      radialNucleusFocus = radialCenter;
+      const spreadVal = parseFloat(document.getElementById('rng-layerspread').value) / 100;
+      const perGroup = Math.max(1, nodesPerLayer);
+      const jitterCfg = STYLE_JITTER[styleMode];
+      const radiusJitterPx = radialOuterRadius * jitterCfg.radiusJitterFrac;
+      // RULE: Layer spread controls how tight each group's fan is — low
+      // spread bunches a group's lines close together, high spread lets
+      // them splay wider — while always leaving a visible gap between the
+      // 3 groups so they read as distinct bundles, never one solid ring.
+      const arcFrac = 0.5 + spreadVal * 0.3;
+      const arcSpan = (Math.PI*2 / SINGLE_GROUP_COUNT) * arcFrac;
+      const sourcePts = [];
+      for(let g=0; g<SINGLE_GROUP_COUNT; g++){
+        const centerAngle = (g / SINGLE_GROUP_COUNT) * Math.PI*2 - Math.PI/2;
+        const pts = singleGroupPositions(perGroup, radialOuterRadius, centerAngle, arcSpan, radialCenter, radiusJitterPx, jitterCfg.angleJitterFrac);
+        pts.forEach(pt => { sourcePts.push(pt); singleNodeGroups.push(g); });
+      }
+      layers = [sourcePts, [{ ...radialCenter }]];
+      unattached = [[], []];
+      LAYER_COUNTS = [sourcePts.length, 1];
+      UNATTACHED_COUNTS = [0, 0];
+      NUM_STAGES = 1;
+      CYCLE = NUM_STAGES * STAGE_DUR + STAGE_PAUSE;
+      stageLines = [buildFullyConnectedStage(layers[0], layers[1])];
+      lines = stageLines.flat();
+      nodeArrivalTimes = computeNodeArrivalTimes();
+      singlePathway = computeSinglePathway();
+      updateCompositionHint();
+      return;
+    }
+
     const built = buildLayerCounts(targetsCount, numLayers, nodesPerLayer);
     LAYER_COUNTS = built.counts;
     UNATTACHED_COUNTS = built.unattached;
     computeLayerX();
     NUM_STAGES = LAYER_COUNTS.length - 1;
     CYCLE = NUM_STAGES * STAGE_DUR + STAGE_PAUSE;
-
-    layers = [];
-    unattached = [];
 
     if(shapeMode === 'radial'){
       radialCenter = { x: W/2, y: H/2 };
@@ -996,6 +1083,10 @@
   // the pre-mutation state first so removeExtraTarget can restore it
   // exactly when the checkbox is turned back off.
   function applyExtraTarget(){
+    // Not applicable to Single-node shape: its sources aren't "targets" in
+    // the degree-capped sense this connects into, and the whole point of
+    // the shape is every source connecting fully to the one shared node.
+    if(shapeMode === 'single') return;
     if(layers.length < 2) return;
     extraTargetSnapshot = {
       targetPts: layers[0].map(p => ({...p})),
@@ -1249,7 +1340,7 @@
   function pathD(l){
     const mx = (l.x0+l.x1)/2, my = (l.y0+l.y1)/2;
     const bow = l.bow || 0;
-    if(shapeMode === 'radial'){
+    if(shapeMode === 'radial' || shapeMode === 'single'){
       if(bow === 0) return `M${l.x0.toFixed(1)},${l.y0.toFixed(1)} L${l.x1.toFixed(1)},${l.y1.toFixed(1)}`;
       const dx = l.x1-l.x0, dy = l.y1-l.y0;
       const len = Math.hypot(dx,dy) || 1;
@@ -1263,6 +1354,11 @@
   function updateCompositionHint(){
     const el = document.getElementById('composition-hint');
     if(!el) return;
+    if(shapeMode === 'single'){
+      const perGroup = LAYER_COUNTS[0] / SINGLE_GROUP_COUNT;
+      el.innerHTML = `<b>${SINGLE_GROUP_COUNT}</b> groups of <b>${perGroup}</b> lines each converge on one shared node — <b>${LAYER_COUNTS[0]}</b> lines total. "Nodes per layer" sets each group's size; "Layer spread" sets how tight each group's fan is.`;
+      return;
+    }
     const chain = LAYER_COUNTS.join(' → ');
     const maxDegree = MAX_DEGREE[compositionMode];
     const totalUnattached = UNATTACHED_COUNTS.reduce((a,b) => a+b, 0);
@@ -1368,7 +1464,7 @@
     // Setting fx/fy to radialNucleusFocus keeps the nucleus-colored end of
     // the gradient following the nucleus itself.
     let defs;
-    if(shapeMode === 'radial'){
+    if(shapeMode === 'radial' || shapeMode === 'single'){
       const reversedStops = stops.slice().reverse();
       const stopMarkupR = reversedStops.map((c,i) => {
         const env = OPACITY_ENVELOPE[i % OPACITY_ENVELOPE.length];
@@ -1393,13 +1489,22 @@
     // layer's position — e.g. an early layer lands near the purple stop, the
     // last layer lands exactly on the final (orange) stop.
     const layerColors = LAYER_COUNTS.map((_,i) => sampleGradient(stops, i/(LAYER_COUNTS.length-1)));
+    // RULE: Single-node shape colors by GROUP instead of by layer — every
+    // source shares layer 0, so the shared-gradient-by-layer scheme above
+    // would make them all one flat color, defeating the whole point of a
+    // "3 groups" visual. Sampled across the full gradient (0, 0.5, 1) so
+    // the 3 groups read as clearly distinct.
+    const groupColors = Array.from({length: SINGLE_GROUP_COUNT}, (_,g) => sampleGradient(stops, g/(SINGLE_GROUP_COUNT-1)));
+    function lineStrokeFor(l){
+      return shapeMode === 'single' ? groupColors[singleNodeGroups[l.srcIndex]] : 'url(#fw-shared)';
+    }
 
     let paths = '';
     stageLines.forEach((stage, li) => {
       const lineFaded = isLineFaded(li);
       stage.forEach((l) => {
         if(singlePathwayOn && !pathwayEdgeSet.has(l)) return;
-        paths += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="url(#fw-shared)" stroke-width="${thickness.toFixed(2)}"/>`, lineFaded);
+        paths += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="${lineStrokeFor(l)}" stroke-width="${thickness.toFixed(2)}"/>`, lineFaded);
       });
     });
 
@@ -1481,10 +1586,9 @@
     const DIAMOND_PRESS_WIDTH = 0.35;
 
     layers.forEach((layer, li) => {
-      const litColor = layerColors[li];
+      const layerLitColor = layerColors[li];
       const haloR = 9*sizeScale, dotR = 4*sizeScale;
       const diamondHaloR = haloR*DIAMOND_SCALE, diamondDotR = dotR*DIAMOND_SCALE;
-      const baseFill = permanentColors ? litColor : '#ffffff';
       layer.forEach((pt, ptIndex) => {
         // RULE: rather than touching every branch below (there are many
         // return points across the animate/frameT/permanentColors
@@ -1492,6 +1596,10 @@
         // retroactively fade-wrap whatever markup it appended — a `return`
         // inside a try block still runs `finally` first, so this reaches
         // every branch without editing any of them.
+        // Single-node shape colors sources by their group (see groupColors
+        // above), not by layer — every source shares layer 0.
+        const litColor = (shapeMode === 'single' && li === 0) ? groupColors[singleNodeGroups[ptIndex]] : layerLitColor;
+        const baseFill = permanentColors ? litColor : '#ffffff';
         const nodesMkStart = nodesMk.length;
         const hidden = isLayerHidden(li);
         const faded = isLayerFaded(li);
@@ -2156,6 +2264,7 @@
   document.getElementById('btn-style-organic').addEventListener('click', () => setStyleMode('organic'));
   document.getElementById('btn-shape-linear').addEventListener('click', () => setShapeMode('linear'));
   document.getElementById('btn-shape-radial').addEventListener('click', () => setShapeMode('radial'));
+  document.getElementById('btn-shape-single').addEventListener('click', () => setShapeMode('single'));
 
   // Pushes a composition preset's targets/layers/nodesPerLayer into state
   // and reflects them on the sliders + their value readouts.
@@ -2201,18 +2310,125 @@
     fullRegenerate();
   }
 
-  // Shape (Linear/Radial) is independent of Density and Style too — it only
-  // changes how positions/curves are computed, never resets any slider.
+  // Shape (Linear/Radial/Single node) is independent of Density and Style
+  // too — it only changes how positions/curves are computed, never resets
+  // any slider.
   function setShapeMode(mode){
     if(mode === shapeMode) return;
     shapeMode = mode;
-    ['linear','radial'].forEach(m => {
+    ['linear','radial','single'].forEach(m => {
       document.getElementById('btn-shape-'+m).className = (m === mode) ? 'btn-primary' : 'btn-secondary';
     });
     ({ w: W, h: H } = currentCanvasSize());
     computeLayerX();
     fullRegenerate();
   }
+
+  // ====================== ZOOM / PAN ======================
+  // RULE: purely a viewport transform on the .card wrapper — never touches
+  // W/H, the SVG's own viewBox, or anything generateLayout/render produce,
+  // so zooming into a node is just "look closer," not a different layout.
+  // Wheel/trackpad-pinch always zooms (both report as 'wheel' — a trackpad
+  // pinch additionally sets ctrlKey, but zooming either way is exactly
+  // what's wanted here); left-drag always pans. Re-applied after every
+  // render() since that only rewrites the SVG's own innerHTML, never the
+  // wrapping .card's style, so the current view survives regenerates.
+  (function initZoomPan(){
+    const wrap = document.getElementById('canvas-wrap');
+    const card = document.getElementById('zoom-card');
+    const resetBtn = document.getElementById('btn-zoom-reset');
+    const MIN_ZOOM = 0.3, MAX_ZOOM = 12;
+    let zoom = 1, panX = 0, panY = 0;
+
+    function applyTransform(){
+      card.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    }
+
+    function zoomAt(clientX, clientY, factor){
+      const rect = wrap.getBoundingClientRect();
+      const mx = clientX - rect.left - rect.width/2;
+      const my = clientY - rect.top - rect.height/2;
+      const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * factor));
+      const actual = newZoom / zoom;
+      panX = mx - (mx - panX) * actual;
+      panY = my - (my - panY) * actual;
+      zoom = newZoom;
+      applyTransform();
+    }
+
+    wrap.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0018));
+    }, { passive: false });
+
+    // Left-mouse drag to pan. Listens on window for move/up so a drag that
+    // leaves the canvas area mid-gesture doesn't get stuck "on".
+    let dragging = false, dragStart = null, panStart = null;
+    wrap.addEventListener('mousedown', (e) => {
+      if(e.button !== 0) return;
+      dragging = true;
+      dragStart = { x: e.clientX, y: e.clientY };
+      panStart = { x: panX, y: panY };
+      wrap.classList.add('dragging');
+    });
+    window.addEventListener('mousemove', (e) => {
+      if(!dragging) return;
+      panX = panStart.x + (e.clientX - dragStart.x);
+      panY = panStart.y + (e.clientY - dragStart.y);
+      applyTransform();
+    });
+    window.addEventListener('mouseup', () => {
+      dragging = false;
+      wrap.classList.remove('dragging');
+    });
+
+    // Touch: one finger pans, two fingers pinch-zoom (+ pan on the midpoint).
+    let touchMode = null, touchStart = null;
+    function touchMidpoint(touches){
+      return { x: (touches[0].clientX+touches[1].clientX)/2, y: (touches[0].clientY+touches[1].clientY)/2 };
+    }
+    function touchDist(touches){
+      return Math.hypot(touches[0].clientX-touches[1].clientX, touches[0].clientY-touches[1].clientY);
+    }
+    wrap.addEventListener('touchstart', (e) => {
+      if(e.touches.length === 1){
+        touchMode = 'pan';
+        touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, panX, panY };
+      } else if(e.touches.length === 2){
+        touchMode = 'pinch';
+        touchStart = { dist: touchDist(e.touches), mid: touchMidpoint(e.touches), zoom, panX, panY };
+      }
+    }, { passive: true });
+    wrap.addEventListener('touchmove', (e) => {
+      if(touchMode === 'pan' && e.touches.length === 1){
+        e.preventDefault();
+        panX = touchStart.panX + (e.touches[0].clientX - touchStart.x);
+        panY = touchStart.panY + (e.touches[0].clientY - touchStart.y);
+        applyTransform();
+      } else if(touchMode === 'pinch' && e.touches.length === 2){
+        e.preventDefault();
+        const dist = touchDist(e.touches);
+        const factor = dist / touchStart.dist;
+        zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, touchStart.zoom * factor));
+        const mid = touchMidpoint(e.touches);
+        const rect = wrap.getBoundingClientRect();
+        const mx = mid.x - rect.left - rect.width/2, my = mid.y - rect.top - rect.height/2;
+        panX = touchStart.panX + (mid.x - touchStart.mid.x);
+        panY = touchStart.panY + (mid.y - touchStart.mid.y);
+        applyTransform();
+      }
+    }, { passive: false });
+    wrap.addEventListener('touchend', () => { touchMode = null; });
+
+    resetBtn.addEventListener('click', () => {
+      zoom = 1; panX = 0; panY = 0;
+      applyTransform();
+    });
+    wrap.addEventListener('dblclick', () => {
+      zoom = 1; panX = 0; panY = 0;
+      applyTransform();
+    });
+  })();
 
   // ====================== INIT ======================
   computeLayerX();
