@@ -330,21 +330,36 @@
   const RADIAL_NUCLEUS_RADIUS_FRAC = 0.15; // fraction of outer radius
   const RADIAL_NUCLEUS_DRIFT_FRAC = 0.6;   // how far the nucleus can drift off the true center, as a fraction of outer radius
 
+  // Minimum arc length (px) to leave between adjacent nodes on a ring, so a
+  // ring never gets so small relative to its node count that neighbors'
+  // halos (peak ~34px across at the default node size, during the pulse
+  // bump) overlap. Independent of the live node-size slider — like the
+  // Linear gap below, ring geometry is decided once at layout time, not
+  // continuously reactive to a purely cosmetic control.
+  const MIN_RADIAL_ARC_SPACING = 80;
+  function minRadiusForRingCount(count){
+    return count > 1 ? (MIN_RADIAL_ARC_SPACING * count) / (2*Math.PI) : 0;
+  }
+
   // Radius for layer `li` of `totalLayers`, given the canvas's outer radius
   // and the Layer-spread slider (0–1): higher spread pushes the ring-to-
   // -nucleus transition further out, so rings occupy more of the radius
   // before collapsing inward; lower spread bunches rings near the edge.
-  function radialRadiusForLayer(li, totalLayers, outerRadius, spreadVal){
+  // Never returns less than minRadiusForRingCount(count) — the nucleus's
+  // tight falloff is a stylistic default, not a hard floor, and loses to
+  // avoiding overlap when a layer has enough nodes to need more room.
+  function radialRadiusForLayer(li, totalLayers, outerRadius, spreadVal, count){
     const nucleusRadius = outerRadius * RADIAL_NUCLEUS_RADIUS_FRAC;
     const nucleusLayers = Math.min(RADIAL_NUCLEUS_LAYERS, Math.max(totalLayers - 1, 0));
     const ringLayerCount = totalLayers - nucleusLayers;
+    const minRadius = minRadiusForRingCount(count);
     if(li >= ringLayerCount){
       const nucleusIndex = li - ringLayerCount; // 0 or 1
-      return nucleusRadius * (1 - nucleusIndex * 0.4);
+      return Math.max(nucleusRadius * (1 - nucleusIndex * 0.4), minRadius);
     }
     const innerBound = nucleusRadius * (1.4 + spreadVal * 2.2);
     const t = ringLayerCount > 1 ? li / (ringLayerCount - 1) : 0;
-    return outerRadius - t * (outerRadius - innerBound);
+    return Math.max(outerRadius - t * (outerRadius - innerBound), minRadius);
   }
 
   // Max edges a single node may fan out to in the next layer, purely a
@@ -688,11 +703,19 @@
   // around the true center) as a final, unconditional safety net — this is
   // measured from radialCenter, not the possibly-drifted `center` passed
   // in, so it holds regardless of jitter/drift combination.
+  //
+  // RULE: radius jitter scales off THIS ring's own radius, not the outer
+  // canvas radius — the nucleus's tight inner rings are a small fraction of
+  // the outer radius, so sizing their jitter off the outer radius let it
+  // dwarf the ring's own scale and throw points clean into a neighboring
+  // ring's territory, reading as nodes from two different layers
+  // overlapping. Scaling off `radius` keeps jitter proportional to
+  // whatever ring it's actually perturbing.
   function radialLayerPositions(count, radius, isTargets, rotationOffset, center){
     const style = STYLE_JITTER[styleMode];
     const angleJitterFrac = isTargets ? Math.max(style.angleJitterFrac, RADIAL_TARGET_MIN_ANGLE_JITTER) : style.angleJitterFrac;
     const radiusJitterFrac = isTargets ? Math.max(style.radiusJitterFrac, RADIAL_TARGET_MIN_RADIUS_JITTER) : style.radiusJitterFrac;
-    const radiusJitterPx = radialOuterRadius * radiusJitterFrac;
+    const radiusJitterPx = radius * radiusJitterFrac;
     const pointAt = (r, angle) => clampToCanvas({ x: center.x + r*Math.cos(angle), y: center.y + r*Math.sin(angle) });
     if(count === 1) return [pointAt(radius, rotationOffset)];
     const angleStep = (Math.PI*2) / count;
@@ -766,9 +789,30 @@
       // into a mechanical spoke-and-wheel pattern.
       const ringRotations = LAYER_COUNTS.map(() => Math.random()*Math.PI*2);
       const lastLayer = LAYER_COUNTS.length - 1;
+      // RULE: rings must nest outside-in with real separation between them
+      // — same-ring crowding isn't the only way nodes end up overlapping;
+      // two ADJACENT rings sized too close together (e.g. both forced wide
+      // by minRadiusForRingCount for a big node count) put entirely
+      // different layers' nodes on top of each other. Fixed up in two
+      // passes: first, each ring's own bare-minimum radius for its node
+      // count; then, working from the innermost ring outward, every outer
+      // ring is grown (never shrunk — that would reintroduce its own
+      // internal crowding) until it clears the ring just inside it by
+      // MIN_RING_GAP.
+      const MIN_RING_GAP = 90;
+      const bareRadii = LAYER_COUNTS.map((connectedCount, li) => {
+        const total = connectedCount + UNATTACHED_COUNTS[li];
+        const minRadius = minRadiusForRingCount(total);
+        const ideal = radialRadiusForLayer(li, LAYER_COUNTS.length, radialOuterRadius, spreadVal, total);
+        return Math.max(ideal, minRadius);
+      });
+      const ringRadii = bareRadii.slice();
+      for(let li=ringRadii.length-2; li>=0; li--){
+        ringRadii[li] = Math.max(ringRadii[li], ringRadii[li+1] + MIN_RING_GAP);
+      }
       LAYER_COUNTS.forEach((connectedCount, li) => {
         const total = connectedCount + UNATTACHED_COUNTS[li];
-        const radius = radialRadiusForLayer(li, LAYER_COUNTS.length, radialOuterRadius, spreadVal);
+        const radius = ringRadii[li];
         const t = lastLayer > 0 ? li / lastLayer : 0;
         const layerCenter = {
           x: radialCenter.x + (radialNucleusFocus.x - radialCenter.x) * t,
