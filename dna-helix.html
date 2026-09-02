@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dot DNA Helix</title>
+<style>
+  html,body{
+    margin:0; height:100%; overflow:hidden;
+    background:#04051a;
+    display:flex; align-items:center; justify-content:center;
+  }
+  svg{ display:block; width:100vw; height:100vh; }
+</style>
+</head>
+<body>
+<svg id="stage" xmlns="http://www.w3.org/2000/svg"></svg>
+<script>
+(function(){
+
+  // ====================== TUNABLES ======================
+  const PAIRS = 16;            // nucleotide pairs (rungs) along the strand
+  const TOTAL_TURNS = 2;       // full spiral turns visible top to bottom
+  const PERIOD_SEC = 8;        // seconds for one full 360° rotation — the loop point
+  const RADIUS = 100;          // helix radius, px (at the reference viewBox scale)
+  const STRAND_SPAN = 560;     // vertical extent of the helix, px
+  const DOT_OUTER_R = 20;      // outer circle radius (the muted disc)
+  const DOT_INNER_R = 8;       // inner circle radius (the white core)
+  const EDGE_FADE_PAIRS = 2.2; // how many pairs at each tip fade out
+
+  // Colors lifted from the reference dot: near-black navy background, a
+  // muted slate-indigo disc, and a solid white core.
+  const BG = '#04051a';
+  const DISC = '#3c3f58';
+  const CORE = '#ffffff';
+  const BOND = '#3c3f58'; // backbone/rung strokes reuse the disc color, dimmed via opacity
+
+  const VB_W = 700, VB_H = 700;
+  const cx = VB_W/2, cy = VB_H/2;
+
+  const svg = document.getElementById('stage');
+  svg.setAttribute('viewBox', `0 0 ${VB_W} ${VB_H}`);
+  svg.style.background = BG;
+
+  function el(tag, attrs){
+    const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for(const k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+
+  // ---- persistent element pools, updated (not recreated) every frame ----
+  const rungEls = [];
+  const backboneAEls = [], backboneBEls = [];
+  const dotEls = []; // { g, outer, inner, strand, i }
+
+  for(let i=0;i<PAIRS;i++){
+    rungEls.push(svg.appendChild(el('line', { stroke: BOND, 'stroke-width': 2, 'stroke-linecap': 'round' })));
+  }
+  for(let i=0;i<PAIRS-1;i++){
+    backboneAEls.push(svg.appendChild(el('line', { stroke: BOND, 'stroke-width': 3, 'stroke-linecap': 'round' })));
+    backboneBEls.push(svg.appendChild(el('line', { stroke: BOND, 'stroke-width': 3, 'stroke-linecap': 'round' })));
+  }
+  ['A','B'].forEach(strand => {
+    for(let i=0;i<PAIRS;i++){
+      const g = svg.appendChild(el('g', {}));
+      const outer = g.appendChild(el('circle', { r: DOT_OUTER_R, fill: DISC, cx: 0, cy: 0 }));
+      const inner = g.appendChild(el('circle', { r: DOT_INNER_R, fill: CORE, cx: 0, cy: 0 }));
+      dotEls.push({ g, outer, inner, strand, i });
+    }
+  });
+
+  // Depth (z, -RADIUS..RADIUS) -> visual scale / opacity, giving the
+  // rotation a 3D read without changing the dot's own colors.
+  function depthScale(z){ return 0.55 + (z/RADIUS + 1)/2 * 0.65; }   // 0.55 – 1.20
+  function depthOpacity(z){ return 0.32 + (z/RADIUS + 1)/2 * 0.68; } // 0.32 – 1.00
+  function edgeFade(i){
+    const distFromTop = i;
+    const distFromBottom = (PAIRS-1) - i;
+    const t = Math.min(distFromTop, distFromBottom) / EDGE_FADE_PAIRS;
+    return Math.max(0, Math.min(1, t));
+  }
+
+  const angularSpeed = (Math.PI*2) / PERIOD_SEC;
+  const twistPerPair = (Math.PI*2*TOTAL_TURNS) / (PAIRS-1);
+  const ySpacing = STRAND_SPAN / (PAIRS-1);
+  const yTop = cy - STRAND_SPAN/2;
+
+  function position(strand, i, rotation){
+    const theta = i*twistPerPair + rotation + (strand === 'B' ? Math.PI : 0);
+    return {
+      x: cx + RADIUS*Math.cos(theta),
+      y: yTop + i*ySpacing,
+      z: RADIUS*Math.sin(theta)
+    };
+  }
+
+  function frame(tMs){
+    const rotation = (tMs/1000) * angularSpeed;
+
+    const A = [], B = [];
+    for(let i=0;i<PAIRS;i++){
+      A.push(position('A', i, rotation));
+      B.push(position('B', i, rotation));
+    }
+
+    // backbones
+    for(let i=0;i<PAIRS-1;i++){
+      const a0=A[i], a1=A[i+1], z=(a0.z+a1.z)/2, fade=Math.min(edgeFade(i),edgeFade(i+1));
+      const lA = backboneAEls[i];
+      lA.setAttribute('x1',a0.x); lA.setAttribute('y1',a0.y);
+      lA.setAttribute('x2',a1.x); lA.setAttribute('y2',a1.y);
+      lA.setAttribute('opacity', depthOpacity(z)*0.55*fade);
+      lA.__z = z;
+
+      const b0=B[i], b1=B[i+1];
+      const lB = backboneBEls[i];
+      lB.setAttribute('x1',b0.x); lB.setAttribute('y1',b0.y);
+      lB.setAttribute('x2',b1.x); lB.setAttribute('y2',b1.y);
+      lB.setAttribute('opacity', depthOpacity((b0.z+b1.z)/2)*0.55*fade);
+      lB.__z = (b0.z+b1.z)/2;
+    }
+
+    // rungs (base pairs)
+    for(let i=0;i<PAIRS;i++){
+      const a=A[i], b=B[i], z=(a.z+b.z)/2, fade=edgeFade(i);
+      const r = rungEls[i];
+      r.setAttribute('x1',a.x); r.setAttribute('y1',a.y);
+      r.setAttribute('x2',b.x); r.setAttribute('y2',b.y);
+      r.setAttribute('opacity', depthOpacity(z)*0.4*fade);
+      r.__z = z;
+    }
+
+    // dots
+    dotEls.forEach(d => {
+      const p = d.strand === 'A' ? A[d.i] : B[d.i];
+      const s = depthScale(p.z), fade = edgeFade(d.i);
+      d.g.setAttribute('transform', `translate(${p.x} ${p.y}) scale(${s})`);
+      d.g.setAttribute('opacity', depthOpacity(p.z)*fade);
+      d.__z = p.z;
+    });
+
+    // paint order back-to-front: reappend every element sorted by depth
+    const all = [...rungEls, ...backboneAEls, ...backboneBEls, ...dotEls.map(d=>d.g)];
+    all.sort((x,y) => x.__z - y.__z).forEach(n => svg.appendChild(n));
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
