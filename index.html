@@ -246,7 +246,8 @@
         built-in recorder — needs Chrome or Edge. Produces a "fragmented"
         MP4 that plays fine in browsers and on uploads (Instagram, websites,
         etc.), but macOS's own QuickTime/Preview can't open it directly; VLC
-        handles it fine.
+        handles it fine. Exports whatever's currently zoomed/panned into
+        view — zoom into a pathway first if you want just that.
       </div>
 
       <label class="checkbox-row" style="margin-top:10px;">
@@ -528,6 +529,11 @@
   let extraTargetSnapshot = null;
   let currentPalette = 'aurora';
   let variationCount = 0;
+  // Mirrors the zoom/pan module's own zoom/panX/panY (see initZoomPan) so
+  // video export can tell whether the user has actually zoomed/panned at
+  // all, distinct from a diagram that merely happens to overflow the
+  // canvas-wrap at the current window size — see computeVisibleCropViewBox.
+  let currentZoomState = { zoom: 1, panX: 0, panY: 0 };
 
   // Radial-only geometry, recomputed in generateLayout() whenever the shape
   // is 'radial'. radialCenter is the true canvas center, where the outer
@@ -2031,9 +2037,48 @@
     });
   }
 
-  function buildFrameSvgMarkup(frameT){
+  // RULE: video export follows the current on-screen zoom/pan instead of
+  // always exporting the full, unzoomed diagram — see
+  // computeVisibleCropViewBox below for how that crop is derived. `outW`/
+  // `outH` size the SVG's own width/height attributes (not just the final
+  // canvas draw size) so a zoomed-in crop still rasterizes at the target
+  // output resolution instead of the crop's native (much smaller, once
+  // zoomed) viewBox unit count — otherwise a tight zoom would come out
+  // blurry no matter how high the export resolution is set.
+  function buildFrameSvgMarkup(frameT, crop, outW, outH){
     const svgInner = render(frameT);
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${svgInner}</svg>`;
+    const vb = crop ? `${crop.x.toFixed(2)} ${crop.y.toFixed(2)} ${crop.w.toFixed(2)} ${crop.h.toFixed(2)}` : `0 0 ${W} ${H}`;
+    const w = outW || W, h = outH || H;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" width="${w}" height="${h}">${svgInner}</svg>`;
+  }
+
+  // Maps the canvas-wrap's current visible screen rectangle back onto the
+  // diagram's own SVG viewBox coordinates, using the live, already-applied
+  // zoom/pan CSS transform on #zoom-card (see the ZOOM / PAN section) —
+  // getBoundingClientRect() reflects that transform automatically, however
+  // it was produced.
+  //
+  // RULE: only used once the user has actually zoomed or panned (see
+  // currentZoomState) — a full, untouched diagram that merely happens to
+  // be wider than the canvas-wrap at the current browser window size would
+  // otherwise get silently cropped to whatever sliver is on screen, when
+  // the whole point of the *default* export has always been "the entire
+  // diagram," independent of window size. Once the user has deliberately
+  // zoomed/panned, though, "export what I'm looking at" is exactly right.
+  function computeVisibleCropViewBox(){
+    if(currentZoomState.zoom === 1 && currentZoomState.panX === 0 && currentZoomState.panY === 0){
+      return { x: 0, y: 0, w: W, h: H };
+    }
+    const svgRect = document.getElementById('stage').getBoundingClientRect();
+    const wrapRect = document.getElementById('canvas-wrap').getBoundingClientRect();
+    if(svgRect.width <= 0 || svgRect.height <= 0) return { x: 0, y: 0, w: W, h: H };
+    const toX = (screenX) => (screenX - svgRect.left) / svgRect.width * W;
+    const toY = (screenY) => (screenY - svgRect.top) / svgRect.height * H;
+    const x0 = Math.max(0, Math.min(W, toX(wrapRect.left)));
+    const y0 = Math.max(0, Math.min(H, toY(wrapRect.top)));
+    const x1 = Math.max(0, Math.min(W, toX(wrapRect.right)));
+    const y1 = Math.max(0, Math.min(H, toY(wrapRect.bottom)));
+    return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
   }
 
   class VideoExportCancelled extends Error {}
@@ -2044,7 +2089,7 @@
   // duration is correct by construction rather than by keeping pace with a
   // deadline. isCancelled() is polled between frames so a stuck/slow
   // encoder can be bailed out of cleanly instead of hanging the page.
-  async function exportVideoWebCodecs({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled }){
+  async function exportVideoWebCodecs({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled, crop }){
     const bitrate = Math.round(Math.min(VIDEO_MAX_BITRATE_EXPERIMENTAL, Math.max(VIDEO_MIN_BITRATE_EXPERIMENTAL,
       outW * outH * VIDEO_FPS * VIDEO_BITS_PER_PIXEL_PER_FRAME)));
     // Try VP9 first (better compression at this bitrate), fall back to VP8
@@ -2081,7 +2126,7 @@
         if(encoderError) throw encoderError;
         const elapsedMs = i * (1000 / VIDEO_FPS);
         const frameT = (elapsedMs % cycleMs) / cycleMs;
-        const img = await svgFrameToImage(buildFrameSvgMarkup(frameT));
+        const img = await svgFrameToImage(buildFrameSvgMarkup(frameT, crop, outW, outH));
         ctx.clearRect(0, 0, outW, outH);
         ctx.drawImage(img, 0, 0, outW, outH);
 
@@ -2110,7 +2155,7 @@
   }
 
   // Capture strategy 1 (standard, default) — see the RULE block above.
-  async function exportVideoMediaRecorder({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled }){
+  async function exportVideoMediaRecorder({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled, crop }){
     const stream = canvas.captureStream(VIDEO_FPS);
     const [videoTrack] = stream.getVideoTracks();
     const mimeType = VIDEO_MIME_CANDIDATES.find(m => MediaRecorder.isTypeSupported(m));
@@ -2136,7 +2181,7 @@
         continue;
       }
       const frameT = (elapsed % cycleMs) / cycleMs;
-      const img = await svgFrameToImage(buildFrameSvgMarkup(frameT));
+      const img = await svgFrameToImage(buildFrameSvgMarkup(frameT, crop, outW, outH));
       ctx.clearRect(0, 0, outW, outH);
       ctx.drawImage(img, 0, 0, outW, outH);
       videoTrack.requestFrame();
@@ -2204,9 +2249,24 @@
       const cycles = Math.max(1, Math.min(6, parseInt(document.getElementById('num-video-cycles').value) || 1));
       const totalSeconds = CYCLE * cycles;
       const cycleMs = CYCLE * 1000;
+      // RULE: export follows whatever's currently zoomed/panned into view,
+      // not always the full diagram — see computeVisibleCropViewBox. Taken
+      // once up front, before anything else touches the DOM, so it reflects
+      // exactly what was on screen when Export was clicked.
+      const crop = computeVisibleCropViewBox();
+      const isZoomedOrPanned = !(currentZoomState.zoom === 1 && currentZoomState.panX === 0 && currentZoomState.panY === 0);
       const maxDim = useExperimental ? VIDEO_MAX_DIM_EXPERIMENTAL : VIDEO_MAX_DIM;
-      const scale = Math.min(1, maxDim / Math.max(W, H));
-      const outW = Math.max(1, Math.round(W*scale)), outH = Math.max(1, Math.round(H*scale));
+      // RULE: the un-zoomed export never upscales past the diagram's own
+      // native size (min(1, ...) — matches the pre-existing behavior for
+      // the full diagram). But a zoomed-in crop's viewBox-unit dimensions
+      // can be tiny even though the user wants a full-resolution export of
+      // that view — so once actually zoomed, always scale UP to fill maxDim
+      // rather than capping at native size, or a tight zoom would export as
+      // a handful of pixels.
+      const scale = isZoomedOrPanned
+        ? maxDim / Math.max(crop.w, crop.h)
+        : Math.min(1, maxDim / Math.max(crop.w, crop.h));
+      const outW = Math.max(1, Math.round(crop.w*scale)), outH = Math.max(1, Math.round(crop.h*scale));
 
       canvas = document.createElement('canvas');
       canvas.width = outW; canvas.height = outH;
@@ -2225,8 +2285,8 @@
 
       const isCancelled = () => videoExportCancelRequested;
       const result = useExperimental
-        ? await exportVideoWebCodecs({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled })
-        : await exportVideoMediaRecorder({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled });
+        ? await exportVideoWebCodecs({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled, crop })
+        : await exportVideoMediaRecorder({ outW, outH, totalSeconds, cycleMs, progress, canvas, ctx, isCancelled, crop });
 
       const url = URL.createObjectURL(result.blob);
       const a = document.createElement('a');
@@ -2337,6 +2397,9 @@
 
     function applyTransform(){
       card.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+      currentZoomState.zoom = zoom;
+      currentZoomState.panX = panX;
+      currentZoomState.panY = panY;
     }
 
     function zoomAt(clientX, clientY, factor){
