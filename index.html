@@ -1483,7 +1483,18 @@
     stageLines.forEach((stage, li) => {
       const lineFaded = isLineFaded(li);
       stage.forEach((l) => {
-        if(singlePathwayOn && !pathwayEdgeSet.has(l)) return;
+        if(singlePathwayOn && !pathwayEdgeSet.has(l)){
+          // RULE: an edge outside the isolated pathway still gets drawn,
+          // just hollow/dim — the same "nothing just vanishes" principle
+          // already used for unreached nodes below, extended to their
+          // connecting lines too. Without this, a hollow node's own edge
+          // simply disappeared, most noticeably with "Add an extra
+          // target": its one new edge was the only thing on the whole
+          // canvas that vanished outright when isolating a different
+          // target, making the added target look disconnected.
+          paths += `<path d="${pathD(l)}" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.18"/>`;
+          return;
+        }
         paths += fadeWrap(`<path d="${pathD(l)}" fill="none" stroke="${lineStrokeFor(l)}" stroke-width="${thickness.toFixed(2)}"/>`, lineFaded);
       });
     });
